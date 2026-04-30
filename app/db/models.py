@@ -7,7 +7,7 @@ SQLite ORM 数据表定义（Index Monitor - BTC 专用）。
 3) 每个字段都写中文注释，便于后续维护
 """
 
-from sqlalchemy import Column, Float, Integer, String
+from sqlalchemy import Column, DateTime, Float, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.sqlite import JSON
 
 from app.db.database import Base
@@ -109,3 +109,30 @@ class BtcRiskScore(Base):
     date = Column(String(10), primary_key=True, index=True, comment="日期，格式 YYYY-MM-DD")
     score = Column(Float, nullable=True, comment="当日综合风险评分（0-100，越高风险越大）")
     components = Column(JSON, nullable=True, comment="JSON格式，存各子指标贡献值（算法后续完善，暂时可为空）")
+
+
+class MarketData(Base):
+    """
+    兼容旧版 Streamlit 页面使用的通用市场数据表。
+
+    说明：
+    - 这个模型用于兼容 app/ui/main.py + app/services/data_service.py 的旧逻辑
+    - 不影响你当前 BTC 专用表结构（btc_*）
+    """
+
+    __tablename__ = "market_data"
+
+    id = Column(Integer, primary_key=True, index=True)
+    market = Column(String(20), nullable=False, index=True, comment="市场类型（crypto/us/cn）")
+    symbol = Column(String(50), nullable=False, index=True, comment="标的代码（BTC-USD/AAPL/000001.SZ）")
+    timestamp = Column(DateTime, nullable=False, index=True, comment="数据时间戳")
+
+    open = Column(Float, nullable=True, comment="开盘价")
+    high = Column(Float, nullable=True, comment="最高价")
+    low = Column(Float, nullable=True, comment="最低价")
+    close = Column(Float, nullable=True, comment="收盘价")
+    volume = Column(Float, nullable=True, comment="成交量")
+
+    __table_args__ = (
+        UniqueConstraint("market", "symbol", "timestamp", name="uq_market_symbol_timestamp"),
+    )

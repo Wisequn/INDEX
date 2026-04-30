@@ -22,6 +22,21 @@ def _to_datetime_safe(value) -> datetime:
     return pd.to_datetime(value).to_pydatetime()
 
 
+def _to_float_or_none(value):
+    """
+    安全转换为 float。
+    - NaN / 空值 -> None
+    - 可转换值 -> float
+    - 异常值 -> None
+    """
+    if pd.isna(value):
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
 def save_market_dataframe(
     session: Session,
     market: str,
@@ -39,18 +54,32 @@ def save_market_dataframe(
 
     rows = []
     for _, row in df.iterrows():
+        # 有些数据源会返回空行或异常行（如 timestamp 为 NaN），这里直接跳过。
+        if "timestamp" not in row or pd.isna(row["timestamp"]):
+            continue
+
+        try:
+            ts = _to_datetime_safe(row["timestamp"])
+        except Exception:
+            # 时间字段解析失败时跳过该行，避免整批写入报错
+            continue
+
         rows.append(
             {
                 "market": market,
                 "symbol": symbol,
-                "timestamp": _to_datetime_safe(row["timestamp"]),
-                "open": float(row["open"]) if pd.notna(row["open"]) else None,
-                "high": float(row["high"]) if pd.notna(row["high"]) else None,
-                "low": float(row["low"]) if pd.notna(row["low"]) else None,
-                "close": float(row["close"]) if pd.notna(row["close"]) else None,
-                "volume": float(row["volume"]) if pd.notna(row["volume"]) else None,
+                "timestamp": ts,
+                "open": _to_float_or_none(row.get("open")),
+                "high": _to_float_or_none(row.get("high")),
+                "low": _to_float_or_none(row.get("low")),
+                "close": _to_float_or_none(row.get("close")),
+                "volume": _to_float_or_none(row.get("volume")),
             }
         )
+
+    # 全部是无效行时，直接返回 0，不执行 SQL
+    if not rows:
+        return 0
 
     stmt = sqlite_insert(MarketData).values(rows)
     stmt = stmt.on_conflict_do_update(

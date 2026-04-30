@@ -7,14 +7,26 @@ streamlit run app/ui/main.py
 
 from __future__ import annotations
 
+import sys
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
+# 兼容“从任意目录启动 streamlit”：
+# 主动把项目根目录加入 sys.path，避免出现 ModuleNotFoundError: No module named 'app'
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from app.db.base import SessionLocal
+from app.db.database import init_db
 from app.services.data_service import query_market_data, save_market_dataframe
 from app.services.fetchers import fetch_cn_history, fetch_crypto_history, fetch_us_history
+
+# 启动页面时确保相关数据表已经存在（避免首次运行报表不存在）
+init_db()
 
 st.set_page_config(page_title="Index Monitor", layout="wide")
 st.title("Index Monitor - 本地量化数据平台")
