@@ -1,10 +1,11 @@
 """
 BTC Ahr999 历史数据抓取与计算脚本（Prompt 6）。
 
-按优先级自动尝试三种方式：
-1) 第一优先：CoinGlass 官方 API（需要 CG_API_KEY）
-2) 第二优先：公开第三方历史接口（若可用则直接用）
-3) 第三优先：基于价格数据自己计算（幂律回归 + 365天几何均值）
+按优先级自动尝试（与是否设置 CG_API_KEY 有关）：
+
+- **未设置 CG_API_KEY**：不请求 CoinGlass、不请求公开第三方，**直接本地计算**（幂律回归 + 365 天几何均值），避免无 Key 时仍长时间等待易超时的公开接口。
+
+- **已设置 CG_API_KEY**：1) CoinGlass 官方 API → 2) 失败则公开第三方 → 3) 再失败则本地计算。
 
 最终把结果写入 btc_ahr999 表，写入方式为 upsert（按 date 去重更新）。
 """
@@ -272,17 +273,23 @@ def build_ahr999_history() -> tuple[pd.DataFrame, str]:
     - DataFrame（含 date, ahr999_value, 三个百分位）
     - 数据来源说明字符串
     """
-    # 第一优先：CoinGlass 官方 API
-    df = _try_fetch_from_coinglass()
-    if df is not None:
-        return _compute_percentiles(df), "CoinGlass 官方 API"
+    api_key = os.getenv("CG_API_KEY", "").strip()
 
-    # 第二优先：公开第三方数据源
-    df = _try_fetch_from_public_source()
-    if df is not None:
-        return _compute_percentiles(df), "公开第三方 Ahr999 接口"
+    if api_key:
+        # 有 Key：先官方，再公开第三方，最后才本地（与旧版行为一致）
+        df = _try_fetch_from_coinglass()
+        if df is not None:
+            return _compute_percentiles(df), "CoinGlass 官方 API"
 
-    # 第三优先：自计算
+        df = _try_fetch_from_public_source()
+        if df is not None:
+            return _compute_percentiles(df), "公开第三方 Ahr999 接口"
+    else:
+        # 无 Key：不再打公开接口（避免多次超时重试），直接进入本地计算
+        print(
+            "[Ahr999] 未设置 CG_API_KEY：跳过 CoinGlass 与公开第三方，直接使用本地公式（yfinance 价格 + 幂律回归 + 365 日几何均值）。"
+        )
+
     df = _compute_from_price()
     return _compute_percentiles(df), "本地自计算（幂律回归 + 365天几何均值）"
 

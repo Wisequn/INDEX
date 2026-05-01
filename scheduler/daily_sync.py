@@ -12,6 +12,7 @@ from datetime import datetime
 from time import perf_counter
 from typing import Any, Callable
 
+from btc.fetcher_ahr999 import fetch_full_history as fetch_ahr999_full
 from btc.fetcher_ahr999 import fetch_incremental as fetch_ahr999_incremental
 from btc.fetcher_fear_greed import fetch_incremental as fetch_fng_incremental
 from btc.fetcher_ma import run_ma_pipeline
@@ -57,18 +58,31 @@ def _run_step(step_name: str, success_text: str, func: Callable[[], Any]) -> dic
 def run_daily_sync() -> list[dict[str, Any]]:
     """
     按顺序执行每日同步流程：
-    1) BTC 价格增量
-    2) RSI 重算
+    1) BTC 价格：先补「中间断层」，再追「尾部新数据」
+    2) RSI 重算（全表基于 btc_price 重算并 upsert，天然覆盖补数后的日期）
     3) 恐惧贪婪增量
-    4) Ahr999 增量
-    5) 4年均线/200周均线重算
+    4) Ahr999：若第 1 步补过中间价格断层，则本步改为「全量重写入」；否则仍走增量
+       （原因：Ahr999 增量只写 date>库内最大日期的行，补在中间的历史不会靠增量写入）
+    5) 4年均线/200周均线重算（同样全表重算）
     """
     results: list[dict[str, Any]] = []
 
     results.append(_run_step("price", "BTC价格同步完成", fetch_price_incremental))
+
+    # 从价格步骤结果里读取「是否刚修补了中间断层」，决定 Ahr999 用增量还是全量
+    price_result = results[-1].get("result")
+    force_ahr999_full = bool(
+        isinstance(price_result, dict) and price_result.get("had_internal_gaps_filled") is True
+    )
+    if force_ahr999_full:
+        _log("ℹ️ 检测到本次修补了 btc_price 中间断层，Ahr999 将执行全量重写入以保证与价格对齐。")
+
     results.append(_run_step("rsi", "RSI指标计算完成", run_rsi_pipeline))
     results.append(_run_step("fear_greed", "恐惧贪婪指数同步完成", fetch_fng_incremental))
-    results.append(_run_step("ahr999", "Ahr999指标同步完成", fetch_ahr999_incremental))
+
+    ahr999_job: Callable[[], Any] = fetch_ahr999_full if force_ahr999_full else fetch_ahr999_incremental
+    results.append(_run_step("ahr999", "Ahr999指标同步完成", ahr999_job))
+
     results.append(_run_step("ma", "均线计算完成", run_ma_pipeline))
 
     _log("🎉 今日同步全部完成！")
