@@ -14,7 +14,7 @@ set -euo pipefail
 # 设计原则：
 # - 幂等：可重复执行，不会越跑越乱
 # - 可观测：关键步骤统一输出 ✅ / ❌
-# - 安全：默认通过 Caddy basic_auth 做访问保护
+# - 安全：默认通过 Caddy basicauth 做访问保护（Caddy 2 指令名无下划线，勿写成 basic_auth）
 #
 # Python 3.14 注意事项：
 # - 明确使用 python3.14 创建虚拟环境
@@ -31,7 +31,7 @@ STREAMLIT_LOG="$LOG_DIR/streamlit_8504.log"
 DAILY_LOG="$LOG_DIR/daily_sync.log"
 SERVICE_TAG="# index-monitor-quant919"
 
-# basic_auth 用户名和明文密码可通过环境变量传入（建议生产改强密码）
+# 基础认证用户名和明文密码可通过环境变量传入（建议生产改强密码）
 BASIC_AUTH_USER="${BASIC_AUTH_USER:-quantadmin}"
 BASIC_AUTH_PASSWORD="${BASIC_AUTH_PASSWORD:-ChangeMe_123456!}"
 
@@ -54,7 +54,7 @@ append_caddy_block_if_missing() {
 ${SERVICE_TAG} BEGIN
 www.quant919.com {
     encode zstd gzip
-    basic_auth {
+    basicauth {
         ${BASIC_AUTH_USER} ${hashed_password}
     }
     reverse_proxy 127.0.0.1:${STREAMLIT_PORT}
@@ -139,10 +139,10 @@ main() {
   pip install -r requirements.txt || fail "安装依赖失败"
   ok "依赖安装完成"
 
-  # 2) 配置 Caddy（basic_auth + reverse_proxy）
+  # 2) 配置 Caddy（basicauth + reverse_proxy）
   local_hash="$(caddy hash-password --plaintext "$BASIC_AUTH_PASSWORD" | tr -d '\n')"
   [ -n "$local_hash" ] || fail "生成 Caddy 密码哈希失败"
-  ok "basic_auth 密码哈希生成完成"
+  ok "basicauth 密码哈希生成完成"
 
   append_caddy_block_if_missing "$local_hash"
 

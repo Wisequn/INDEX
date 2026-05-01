@@ -5,7 +5,7 @@
 #
 # 使用说明：
 # 1) 把本文件内容合并到 /etc/caddy/Caddyfile
-# 2) 把下面 basic_auth 里的密码哈希替换成真实值
+# 2) 把下面 basicauth 里的密码哈希替换成真实值
 #    生成命令：caddy hash-password --plaintext "你的密码"
 
 www.quant919.com {
@@ -13,7 +13,7 @@ www.quant919.com {
     encode zstd gzip
 
     # 简单访问密码保护（基础认证）
-    basic_auth {
+    basicauth {
         quantadmin REPLACE_WITH_CADDY_HASHED_PASSWORD
     }
 
