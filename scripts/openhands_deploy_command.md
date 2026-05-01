@@ -17,7 +17,9 @@ echo "[3] 最近 50 行 Streamlit 日志："
 tail -n 50 /path/to/Index/logs/streamlit_8504.log || true
 echo "[4] 最近 50 行 Daily Sync 日志："
 tail -n 50 /path/to/Index/logs/daily_sync.log || true
-echo "[5] crontab："
+echo "[5] 最近 30 行 Streamlit 守护日志："
+tail -n 30 /path/to/Index/logs/watchdog_streamlit.log || true
+echo "[6] crontab："
 crontab -l || true
 ```
 
@@ -28,6 +30,7 @@ crontab -l || true
 1. `deploy.sh production` 的完整输出  
 2. `ps -ef` 中 Streamlit 进程行  
 3. `caddy validate` 结果  
-4. `crontab -l` 结果  
+4. `crontab -l` 结果（应含每 5 分钟的 `watchdog_streamlit.sh`）  
 5. `tail -n 50 logs/streamlit_8504.log` 输出  
-6. 最终访问地址是否可打开：`https://www.quant919.com`
+6. `tail -n 30 logs/watchdog_streamlit.log` 输出（守护脚本日志，首次部署后可能尚为空）  
+7. 最终访问地址是否可打开：`https://www.quant919.com`

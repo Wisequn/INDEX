@@ -15,6 +15,7 @@ set -euo pipefail
 # - 幂等：可重复执行，不会越跑越乱
 # - 可观测：关键步骤统一输出 ✅ / ❌
 # - 安全：默认通过 Caddy basicauth 做访问保护（Caddy 2 指令名无下划线，勿写成 basic_auth）
+# - 可用性：crontab 每 5 分钟执行 scripts/watchdog_streamlit.sh，本机探测进程与 HTTP，挂了自动拉起
 #
 # Python 3.14 注意事项：
 # - 明确使用 python3.14 创建虚拟环境
@@ -81,14 +82,18 @@ setup_crontab() {
   cron_tmp="$(mktemp)"
 
   # 保留现有 crontab，先移除本项目旧规则，再写入新规则
-  crontab -l 2>/dev/null | rg -v "scheduler.daily_sync|index-monitor daily sync" > "$cron_tmp" || true
+  crontab -l 2>/dev/null | rg -v "scheduler.daily_sync|index-monitor daily sync|watchdog_streamlit.sh|index-monitor streamlit watchdog" > "$cron_tmp" || true
 
   # 每天 08:15（UTC+8）执行增量同步
   echo "15 8 * * * cd \"$PROJECT_DIR\" && \"$VENV_DIR/bin/python\" -m scheduler.daily_sync >> \"$DAILY_LOG\" 2>&1 # index-monitor daily sync" >> "$cron_tmp"
+
+  # 每 5 分钟：本机检查 Streamlit 进程 + 127.0.0.1:端口 HTTP，不健康则按生产参数重启
+  echo "*/5 * * * * \"$PROJECT_DIR/scripts/watchdog_streamlit.sh\" # index-monitor streamlit watchdog" >> "$cron_tmp"
+
   crontab "$cron_tmp"
   rm -f "$cron_tmp"
 
-  ok "crontab 每日同步任务已配置（08:15 UTC+8）"
+  ok "crontab 已配置：每日 08:15 同步 + 每 5 分钟 Streamlit 健康守护"
 }
 
 start_streamlit() {
@@ -152,7 +157,8 @@ main() {
   caddy reload --config "$CADDY_MAIN_FILE" || fail "Caddy reload 失败"
   ok "Caddy reload 成功"
 
-  # 3) 配置每日定时任务
+  # 3) 配置定时任务（每日同步 + Streamlit 守护）
+  chmod +x "$PROJECT_DIR/scripts/watchdog_streamlit.sh" 2>/dev/null || true
   setup_crontab
 
   # 4) 启动 Streamlit（仅本机回环，外部通过 Caddy 访问）
