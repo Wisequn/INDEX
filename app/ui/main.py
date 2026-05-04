@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -26,51 +27,89 @@ from app.db.models import Btc200wMa, Btc4yMa, BtcAhr999, BtcFearGreed, BtcPrice,
 init_db()
 
 
+def _select_date_plus_labeled_fields(
+    session: Any,
+    model: type,
+    date_column: Any,
+    order_column: Any,
+    field_specs: list[tuple[str, str]],
+) -> tuple[list[Any], list[str]]:
+    """
+    按 ORM 类上是否真有该属性，动态拼装 SELECT 列与 DataFrame 列名。
+
+    用途：
+    - 避免「main.py 已更新、但 app/db/models.py 仍是旧文件」时出现
+      AttributeError: ... has no attribute 'rsi6_pct_2y'
+    - 缺字段时自动跳过对应列（图表里少几条曲线，但不会整页崩溃）
+    """
+    cols: list[Any] = [date_column]
+    labels: list[str] = ["date"]
+    for attr, label in field_specs:
+        if hasattr(model, attr):
+            cols.append(getattr(model, attr))
+            labels.append(label)
+    rows = session.execute(select(*cols).order_by(order_column.asc())).all()
+    return rows, labels
+
+
 def _load_all_history() -> pd.DataFrame:
     """
     一次性读取 BTC 相关表，并按 date 合并成一个总表。
     默认使用“全历史数据”。
     """
+    rsi_pct_specs: list[tuple[str, str]] = [
+        ("rsi6_pct_1y", "RSI6-1Y%"),
+        ("rsi6_pct_2y", "RSI6-2Y%"),
+        ("rsi6_pct_3y", "RSI6-3Y%"),
+        ("rsi6_pct_4y", "RSI6-4Y%"),
+        ("rsi6_pct_all", "RSI6-ALL%"),
+        ("rsi12_pct_1y", "RSI12-1Y%"),
+        ("rsi12_pct_2y", "RSI12-2Y%"),
+        ("rsi12_pct_3y", "RSI12-3Y%"),
+        ("rsi12_pct_4y", "RSI12-4Y%"),
+        ("rsi12_pct_all", "RSI12-ALL%"),
+    ]
+    fg_specs: list[tuple[str, str]] = [
+        ("value", "恐惧贪婪"),
+        ("fg_pct_1y", "恐惧贪婪-1Y%"),
+        ("fg_pct_2y", "恐惧贪婪-2Y%"),
+        ("fg_pct_3y", "恐惧贪婪-3Y%"),
+        ("fg_pct_4y", "恐惧贪婪-4Y%"),
+        ("fg_pct_all", "恐惧贪婪-ALL%"),
+    ]
+    ahr_specs: list[tuple[str, str]] = [
+        ("ahr999_value", "Ahr999"),
+        ("ahr999_pct_1y", "Ahr999-1Y%"),
+        ("ahr999_pct_2y", "Ahr999-2Y%"),
+        ("ahr999_pct_3y", "Ahr999-3Y%"),
+        ("ahr999_pct_4y", "Ahr999-4Y%"),
+        ("ahr999_pct_all", "Ahr999-ALL%"),
+    ]
+
     with SessionLocal() as session:
         price_rows = session.execute(select(BtcPrice.date, BtcPrice.close).order_by(BtcPrice.date.asc())).all()
         rsi_rows = session.execute(select(BtcRsi.date, BtcRsi.rsi6, BtcRsi.rsi12).order_by(BtcRsi.date.asc())).all()
-        rsi_pct_rows = session.execute(
-            select(
-                BtcRsiPercentile.date,
-                BtcRsiPercentile.rsi6_pct_1y,
-                BtcRsiPercentile.rsi6_pct_2y,
-                BtcRsiPercentile.rsi6_pct_3y,
-                BtcRsiPercentile.rsi6_pct_4y,
-                BtcRsiPercentile.rsi6_pct_all,
-                BtcRsiPercentile.rsi12_pct_1y,
-                BtcRsiPercentile.rsi12_pct_2y,
-                BtcRsiPercentile.rsi12_pct_3y,
-                BtcRsiPercentile.rsi12_pct_4y,
-                BtcRsiPercentile.rsi12_pct_all,
-            ).order_by(BtcRsiPercentile.date.asc())
-        ).all()
-        fg_rows = session.execute(
-            select(
-                BtcFearGreed.date,
-                BtcFearGreed.value,
-                BtcFearGreed.fg_pct_1y,
-                BtcFearGreed.fg_pct_2y,
-                BtcFearGreed.fg_pct_3y,
-                BtcFearGreed.fg_pct_4y,
-                BtcFearGreed.fg_pct_all,
-            ).order_by(BtcFearGreed.date.asc())
-        ).all()
-        ahr_rows = session.execute(
-            select(
-                BtcAhr999.date,
-                BtcAhr999.ahr999_value,
-                BtcAhr999.ahr999_pct_1y,
-                BtcAhr999.ahr999_pct_2y,
-                BtcAhr999.ahr999_pct_3y,
-                BtcAhr999.ahr999_pct_4y,
-                BtcAhr999.ahr999_pct_all,
-            ).order_by(BtcAhr999.date.asc())
-        ).all()
+        rsi_pct_rows, rsi_pct_labels = _select_date_plus_labeled_fields(
+            session,
+            BtcRsiPercentile,
+            BtcRsiPercentile.date,
+            BtcRsiPercentile.date,
+            rsi_pct_specs,
+        )
+        fg_rows, fg_labels = _select_date_plus_labeled_fields(
+            session,
+            BtcFearGreed,
+            BtcFearGreed.date,
+            BtcFearGreed.date,
+            fg_specs,
+        )
+        ahr_rows, ahr_labels = _select_date_plus_labeled_fields(
+            session,
+            BtcAhr999,
+            BtcAhr999.date,
+            BtcAhr999.date,
+            ahr_specs,
+        )
         ma4y_rows = session.execute(
             select(
                 Btc4yMa.date,
@@ -93,46 +132,9 @@ def _load_all_history() -> pd.DataFrame:
     df = df_price.copy()
     merge_list = [
         (rsi_rows, ["date", "RSI6", "RSI12"]),
-        (
-            rsi_pct_rows,
-            [
-                "date",
-                "RSI6-1Y%",
-                "RSI6-2Y%",
-                "RSI6-3Y%",
-                "RSI6-4Y%",
-                "RSI6-ALL%",
-                "RSI12-1Y%",
-                "RSI12-2Y%",
-                "RSI12-3Y%",
-                "RSI12-4Y%",
-                "RSI12-ALL%",
-            ],
-        ),
-        (
-            fg_rows,
-            [
-                "date",
-                "恐惧贪婪",
-                "恐惧贪婪-1Y%",
-                "恐惧贪婪-2Y%",
-                "恐惧贪婪-3Y%",
-                "恐惧贪婪-4Y%",
-                "恐惧贪婪-ALL%",
-            ],
-        ),
-        (
-            ahr_rows,
-            [
-                "date",
-                "Ahr999",
-                "Ahr999-1Y%",
-                "Ahr999-2Y%",
-                "Ahr999-3Y%",
-                "Ahr999-4Y%",
-                "Ahr999-ALL%",
-            ],
-        ),
+        (rsi_pct_rows, rsi_pct_labels),
+        (fg_rows, fg_labels),
+        (ahr_rows, ahr_labels),
         (ma4y_rows, ["date", "4年均线", "价格/4年均线"]),
         (ma200w_rows, ["date", "200周均线", "价格/200周均线"]),
     ]
@@ -290,6 +292,13 @@ def _build_figure_normalized(df: pd.DataFrame, selected_series: list[str], norma
 st.set_page_config(page_title="BTC- INDEX分析", layout="wide")
 st.title("BTC- INDEX分析")
 st.caption("默认展示最近1年；可在图上拖拽缩放查看任意时间段。")
+
+if not hasattr(BtcRsiPercentile, "rsi6_pct_2y"):
+    st.warning(
+        "当前加载的 `app/db/models.py` 仍是旧版本（缺少多窗口百分位列）。"
+        "请在项目根执行 `git pull` 后**完全退出并重启** Streamlit；"
+        "若已拉代码，请确认保存了 models.py 且没有开两份不同目录的 Index。"
+    )
 
 df_all = _load_all_history()
 if df_all.empty:
