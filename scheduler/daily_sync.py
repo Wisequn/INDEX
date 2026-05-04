@@ -89,10 +89,10 @@ def run_daily_sync(test: bool = False) -> list[dict[str, Any]]:
     """
     按顺序执行每日同步流程：
     1) BTC 价格：先补「中间断层」，再追「尾部新数据」
-    2) RSI 重算（全表基于 btc_price 重算并 upsert，天然覆盖补数后的日期）
-    3) 恐惧贪婪（全历史重算百分位后整表 upsert）
-    4) Ahr999：若第 1 步补过中间价格断层，则本步改为「全量重写入」；否则仍走增量
-       （原因：价格补洞后 Ahr999 序列需与价格重新对齐）
+    2) RSI 重算（全表基于 btc_price；含 1Y~4Y+ALL 滚动百分位，补价格断层后会随本轮全部重算）
+    3) 恐惧贪婪（全历史重算百分位后整表 upsert，含 1Y~4Y+ALL；与价格补洞无强依赖但每轮刷新）
+    4) Ahr999：若第 1 步补过中间价格断层，则本步改为「全量重写入」；否则仍走「全表 upsert」
+       （价格补洞后指标须重对齐；多窗口百分位随 df 一并写入）
     5) 4年均线/200周均线重算（同样全表重算）
 
     参数：
@@ -114,7 +114,10 @@ def run_daily_sync(test: bool = False) -> list[dict[str, Any]]:
         isinstance(price_result, dict) and price_result.get("had_internal_gaps_filled") is True
     )
     if force_ahr999_full and not test:
-        _log("ℹ️ 检测到本次修补了 btc_price 中间断层，Ahr999 将执行全量重写入以保证与价格对齐。")
+        _log(
+            "ℹ️ 本次已修补 btc_price 中间断层：随后 RSI（多窗口百分位）、恐惧贪婪（全表多窗口）、"
+            "Ahr999（全量重写入）与均线将依次重算，避免补价后仍留空列或错位。"
+        )
 
     results.append(_run_step("rsi", "RSI指标计算完成", run_rsi_pipeline))
     results.append(_run_step("fear_greed", "恐惧贪婪指数同步完成", fetch_fng_incremental))
