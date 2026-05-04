@@ -9,6 +9,7 @@
 说明：
 - 本模块不写数据库
 - 只返回内存里的实时结果字典
+- 返回中附带 `percentiles_eod`：来自库中「最近一个完整交易日」的多窗口百分位（与当日实时 RSI 可对照）
 """
 
 from __future__ import annotations
