@@ -25,7 +25,7 @@ import pandas as pd
 from sqlalchemy import select
 
 from app.db.database import SessionLocal
-from app.db.models import Btc200wMa, Btc4yMa, BtcAhr999, BtcPrice
+from app.db.models import Btc200wMa, Btc4yMa, BtcAhr999, BtcFearGreed, BtcPrice, BtcRsiPercentile
 from btc.indicators_rsi import compute_wilder_rsi
 
 # 币安实时价格接口（无需 Key）
@@ -124,6 +124,29 @@ def _compute_realtime_metrics(price_now: float) -> dict[str, Any]:
         if latest_ahr is not None and latest_price_row is not None and latest_price_row.close:
             ahr_now = float(latest_ahr.ahr999_value) * float(price_now) / float(latest_price_row.close)
 
+        # 4) 最近一个完整交易日入库的多窗口百分位（供前端展示「昨日及以前」的统计语境）
+        latest_rp = session.execute(select(BtcRsiPercentile).order_by(BtcRsiPercentile.date.desc()).limit(1)).scalar_one_or_none()
+        latest_fg = session.execute(select(BtcFearGreed).order_by(BtcFearGreed.date.desc()).limit(1)).scalar_one_or_none()
+
+    pct_block: dict[str, Any] = {}
+    if latest_rp is not None:
+        pct_block["pct_asof_date"] = latest_rp.date
+        for y in (1, 2, 3, 4):
+            pct_block[f"rsi6_pct_{y}y_eod"] = getattr(latest_rp, f"rsi6_pct_{y}y", None)
+            pct_block[f"rsi12_pct_{y}y_eod"] = getattr(latest_rp, f"rsi12_pct_{y}y", None)
+        pct_block["rsi6_pct_all_eod"] = latest_rp.rsi6_pct_all
+        pct_block["rsi12_pct_all_eod"] = latest_rp.rsi12_pct_all
+    if latest_fg is not None:
+        pct_block.setdefault("pct_asof_date", latest_fg.date)
+        for y in (1, 2, 3, 4):
+            pct_block[f"fg_pct_{y}y_eod"] = getattr(latest_fg, f"fg_pct_{y}y", None)
+        pct_block["fg_pct_all_eod"] = latest_fg.fg_pct_all
+    if latest_ahr is not None:
+        pct_block.setdefault("pct_asof_date", latest_ahr.date)
+        for y in (1, 2, 3, 4):
+            pct_block[f"ahr999_pct_{y}y_eod"] = getattr(latest_ahr, f"ahr999_pct_{y}y", None)
+        pct_block["ahr999_pct_all_eod"] = latest_ahr.ahr999_pct_all
+
     return {
         "price": float(price_now),
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -132,6 +155,7 @@ def _compute_realtime_metrics(price_now: float) -> dict[str, Any]:
         "price_to_4y_ma": price_to_4y_ma,
         "price_to_200w_ma": price_to_200w_ma,
         "ahr999": ahr_now,
+        "percentiles_eod": pct_block,
     }
 
 

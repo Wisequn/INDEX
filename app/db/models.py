@@ -43,9 +43,13 @@ class BtcRsiPercentile(Base):
 
     date = Column(String(10), primary_key=True, index=True, comment="日期，格式 YYYY-MM-DD")
     rsi6_pct_1y = Column(Float, nullable=True, comment="RSI6 在过去1年历史数据中的百分位（0-100）")
+    rsi6_pct_2y = Column(Float, nullable=True, comment="RSI6 在过去2年历史数据中的百分位（0-100）")
+    rsi6_pct_3y = Column(Float, nullable=True, comment="RSI6 在过去3年历史数据中的百分位（0-100）")
     rsi6_pct_4y = Column(Float, nullable=True, comment="RSI6 在过去4年历史数据中的百分位（0-100）")
     rsi6_pct_all = Column(Float, nullable=True, comment="RSI6 在全部历史数据中的百分位（0-100）")
     rsi12_pct_1y = Column(Float, nullable=True, comment="RSI12 在过去1年历史数据中的百分位（0-100）")
+    rsi12_pct_2y = Column(Float, nullable=True, comment="RSI12 在过去2年历史数据中的百分位（0-100）")
+    rsi12_pct_3y = Column(Float, nullable=True, comment="RSI12 在过去3年历史数据中的百分位（0-100）")
     rsi12_pct_4y = Column(Float, nullable=True, comment="RSI12 在过去4年历史数据中的百分位（0-100）")
     rsi12_pct_all = Column(Float, nullable=True, comment="RSI12 在全部历史数据中的百分位（0-100）")
 
@@ -59,6 +63,8 @@ class BtcFearGreed(Base):
     value = Column(Integer, nullable=True, comment="当日恐惧贪婪指数值（0-100整数）")
     classification = Column(String(30), nullable=True, comment="文字描述：Extreme Fear/Fear/Neutral/Greed/Extreme Greed")
     fg_pct_1y = Column(Float, nullable=True, comment="value 在过去1年历史数据中的百分位（0-100）")
+    fg_pct_2y = Column(Float, nullable=True, comment="value 在过去2年历史数据中的百分位（0-100）")
+    fg_pct_3y = Column(Float, nullable=True, comment="value 在过去3年历史数据中的百分位（0-100）")
     fg_pct_4y = Column(Float, nullable=True, comment="value 在过去4年历史数据中的百分位（0-100）")
     fg_pct_all = Column(Float, nullable=True, comment="value 在全部历史数据中的百分位（0-100）")
 
@@ -71,6 +77,8 @@ class BtcAhr999(Base):
     date = Column(String(10), primary_key=True, index=True, comment="日期，格式 YYYY-MM-DD")
     ahr999_value = Column(Float, nullable=True, comment="当日 Ahr999 指标数值")
     ahr999_pct_1y = Column(Float, nullable=True, comment="ahr999_value 在过去1年历史数据中的百分位（0-100）")
+    ahr999_pct_2y = Column(Float, nullable=True, comment="ahr999_value 在过去2年历史数据中的百分位（0-100）")
+    ahr999_pct_3y = Column(Float, nullable=True, comment="ahr999_value 在过去3年历史数据中的百分位（0-100）")
     ahr999_pct_4y = Column(Float, nullable=True, comment="ahr999_value 在过去4年历史数据中的百分位（0-100）")
     ahr999_pct_all = Column(Float, nullable=True, comment="ahr999_value 在全部历史数据中的百分位（0-100）")
 

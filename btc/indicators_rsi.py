@@ -7,8 +7,8 @@ RSI 指标计算脚本（Prompt 4）。
 3) 计算 RSI 百分位并写入 btc_rsi_percentile（upsert）
 
 说明：
-- 百分位使用 scipy.stats.percentileofscore，kind='rank'
-- 百分位窗口是“当天往前 N 天（含当天）”的数据
+- 百分位使用 scipy.stats.percentileofscore，kind='rank'（封装见 btc/percentile_common.py）
+- 百分位窗口是「当天往前 N 个日历日（含当天）」；1Y=365、2Y=730、3Y=1095、4Y=1460
 """
 
 from __future__ import annotations
@@ -16,11 +16,11 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
-from scipy.stats import percentileofscore
 from sqlalchemy import select
 
 from app.db.database import SessionLocal, init_db, upsert_by_date
 from app.db.models import BtcPrice, BtcRsi, BtcRsiPercentile
+from btc.percentile_common import add_multi_year_percentiles, rolling_percentile_series
 
 
 def load_price_history() -> pd.DataFrame:
@@ -88,40 +88,6 @@ def compute_wilder_rsi(close_series: pd.Series, period: int) -> pd.Series:
     return rsi
 
 
-def _rolling_percentile(values: pd.Series, window_days: int | None) -> pd.Series:
-    """
-    计算“当天值”在历史窗口中的百分位（0-100）。
-
-    参数：
-    - values: 一列指标值（如 RSI6）
-    - window_days:
-      - 365 表示过去1年窗口
-      - 1460 表示过去4年窗口
-      - None 表示全部历史窗口
-    """
-    result = pd.Series(index=values.index, dtype="float64")
-
-    for i in range(len(values)):
-        current_value = values.iloc[i]
-        if pd.isna(current_value):
-            continue
-
-        if window_days is None:
-            window = values.iloc[: i + 1]
-        else:
-            start = max(0, i - window_days + 1)
-            window = values.iloc[start : i + 1]
-
-        # 只保留有效数值
-        window = window.dropna()
-        if window.empty:
-            continue
-
-        result.iloc[i] = float(percentileofscore(window.to_numpy(), current_value, kind="rank"))
-
-    return result
-
-
 def build_rsi_and_percentile_df(price_df: pd.DataFrame) -> pd.DataFrame:
     """
     基于价格 DataFrame 计算 RSI 与对应百分位，返回完整结果表。
@@ -133,9 +99,13 @@ def build_rsi_and_percentile_df(price_df: pd.DataFrame) -> pd.DataFrame:
                 "rsi6",
                 "rsi12",
                 "rsi6_pct_1y",
+                "rsi6_pct_2y",
+                "rsi6_pct_3y",
                 "rsi6_pct_4y",
                 "rsi6_pct_all",
                 "rsi12_pct_1y",
+                "rsi12_pct_2y",
+                "rsi12_pct_3y",
                 "rsi12_pct_4y",
                 "rsi12_pct_all",
             ]
@@ -148,15 +118,12 @@ def build_rsi_and_percentile_df(price_df: pd.DataFrame) -> pd.DataFrame:
     df["rsi6"] = compute_wilder_rsi(df["close"], period=6)
     df["rsi12"] = compute_wilder_rsi(df["close"], period=12)
 
-    # 计算 RSI6 百分位
-    df["rsi6_pct_1y"] = _rolling_percentile(df["rsi6"], window_days=365)
-    df["rsi6_pct_4y"] = _rolling_percentile(df["rsi6"], window_days=1460)
-    df["rsi6_pct_all"] = _rolling_percentile(df["rsi6"], window_days=None)
+    # RSI6 / RSI12：1Y~4Y 滚动百分位 + 全历史百分位（算法见 btc/percentile_common.py）
+    add_multi_year_percentiles(df, "rsi6", "rsi6", years=(1, 2, 3, 4))
+    df["rsi6_pct_all"] = rolling_percentile_series(df["rsi6"], None)
 
-    # 计算 RSI12 百分位
-    df["rsi12_pct_1y"] = _rolling_percentile(df["rsi12"], window_days=365)
-    df["rsi12_pct_4y"] = _rolling_percentile(df["rsi12"], window_days=1460)
-    df["rsi12_pct_all"] = _rolling_percentile(df["rsi12"], window_days=None)
+    add_multi_year_percentiles(df, "rsi12", "rsi12", years=(1, 2, 3, 4))
+    df["rsi12_pct_all"] = rolling_percentile_series(df["rsi12"], None)
 
     return df
 
@@ -191,9 +158,13 @@ def save_rsi_tables(df: pd.DataFrame) -> tuple[int, int]:
             pct_payload: dict[str, Any] = {
                 "date": date,
                 "rsi6_pct_1y": float(row["rsi6_pct_1y"]) if pd.notna(row["rsi6_pct_1y"]) else None,
+                "rsi6_pct_2y": float(row["rsi6_pct_2y"]) if pd.notna(row["rsi6_pct_2y"]) else None,
+                "rsi6_pct_3y": float(row["rsi6_pct_3y"]) if pd.notna(row["rsi6_pct_3y"]) else None,
                 "rsi6_pct_4y": float(row["rsi6_pct_4y"]) if pd.notna(row["rsi6_pct_4y"]) else None,
                 "rsi6_pct_all": float(row["rsi6_pct_all"]) if pd.notna(row["rsi6_pct_all"]) else None,
                 "rsi12_pct_1y": float(row["rsi12_pct_1y"]) if pd.notna(row["rsi12_pct_1y"]) else None,
+                "rsi12_pct_2y": float(row["rsi12_pct_2y"]) if pd.notna(row["rsi12_pct_2y"]) else None,
+                "rsi12_pct_3y": float(row["rsi12_pct_3y"]) if pd.notna(row["rsi12_pct_3y"]) else None,
                 "rsi12_pct_4y": float(row["rsi12_pct_4y"]) if pd.notna(row["rsi12_pct_4y"]) else None,
                 "rsi12_pct_all": float(row["rsi12_pct_all"]) if pd.notna(row["rsi12_pct_all"]) else None,
             }
@@ -218,18 +189,26 @@ def run_rsi_pipeline() -> dict[str, Any]:
     rsi_rows, pct_rows = save_rsi_tables(result_df)
 
     latest = result_df.iloc[-1]
+
+    def _f(col: str) -> float | None:
+        return None if pd.isna(latest[col]) else float(latest[col])
+
     return {
         "btc_rsi_rows_written": rsi_rows,
         "btc_rsi_percentile_rows_written": pct_rows,
         "latest_date": latest["date"],
-        "latest_rsi6": None if pd.isna(latest["rsi6"]) else float(latest["rsi6"]),
-        "latest_rsi12": None if pd.isna(latest["rsi12"]) else float(latest["rsi12"]),
-        "latest_rsi6_pct_1y": None if pd.isna(latest["rsi6_pct_1y"]) else float(latest["rsi6_pct_1y"]),
-        "latest_rsi6_pct_4y": None if pd.isna(latest["rsi6_pct_4y"]) else float(latest["rsi6_pct_4y"]),
-        "latest_rsi6_pct_all": None if pd.isna(latest["rsi6_pct_all"]) else float(latest["rsi6_pct_all"]),
-        "latest_rsi12_pct_1y": None if pd.isna(latest["rsi12_pct_1y"]) else float(latest["rsi12_pct_1y"]),
-        "latest_rsi12_pct_4y": None if pd.isna(latest["rsi12_pct_4y"]) else float(latest["rsi12_pct_4y"]),
-        "latest_rsi12_pct_all": None if pd.isna(latest["rsi12_pct_all"]) else float(latest["rsi12_pct_all"]),
+        "latest_rsi6": _f("rsi6"),
+        "latest_rsi12": _f("rsi12"),
+        "latest_rsi6_pct_1y": _f("rsi6_pct_1y"),
+        "latest_rsi6_pct_2y": _f("rsi6_pct_2y"),
+        "latest_rsi6_pct_3y": _f("rsi6_pct_3y"),
+        "latest_rsi6_pct_4y": _f("rsi6_pct_4y"),
+        "latest_rsi6_pct_all": _f("rsi6_pct_all"),
+        "latest_rsi12_pct_1y": _f("rsi12_pct_1y"),
+        "latest_rsi12_pct_2y": _f("rsi12_pct_2y"),
+        "latest_rsi12_pct_3y": _f("rsi12_pct_3y"),
+        "latest_rsi12_pct_4y": _f("rsi12_pct_4y"),
+        "latest_rsi12_pct_all": _f("rsi12_pct_all"),
     }
 
 

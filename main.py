@@ -16,6 +16,7 @@ from datetime import datetime
 from time import perf_counter
 from typing import Any, Callable
 
+from app.db.database import init_db
 from btc.fetcher_ahr999 import fetch_full_history as fetch_ahr999_full
 from btc.fetcher_fear_greed import fetch_full_history as fetch_fng_full
 from btc.fetcher_ma import run_ma_pipeline
@@ -62,6 +63,9 @@ def run_full_initialization() -> list[dict[str, Any]]:
     4) Ahr999 全量
     5) 均线重算
     """
+    # 建表 + 幂等补列（含多窗口百分位列）
+    init_db()
+
     results: list[dict[str, Any]] = []
 
     results.append(_run_step("price_full", "BTC价格全量同步完成", fetch_price_full))

@@ -4,7 +4,7 @@
 本脚本负责：
 1) 从 Alternative.me 官方 API 获取恐惧贪婪指数历史数据
 2) 把 timestamp 转换为 YYYY-MM-DD 日期字符串
-3) 计算 1年 / 4年 / 全历史 百分位（percentileofscore, kind='rank'）
+3) 计算 1Y / 2Y / 3Y / 4Y / 全历史 滚动百分位（percentileofscore, kind='rank'）
 4) 通过 upsert 写入 btc_fear_greed 表
 5) 提供全量和增量两种更新方式
 """
@@ -19,11 +19,11 @@ from typing import Any
 from urllib.request import urlopen
 
 import pandas as pd
-from scipy.stats import percentileofscore
 from sqlalchemy import func, select
 
 from app.db.database import SessionLocal, init_db, upsert_by_date
 from app.db.models import BtcFearGreed
+from btc.percentile_common import add_multi_year_percentiles, rolling_percentile_series
 
 # 官方 API：limit=0 表示返回全部历史
 FNG_API_URL = "https://api.alternative.me/fng/?limit=0&format=json"
@@ -101,43 +101,28 @@ def load_fng_history_df() -> pd.DataFrame:
     return df
 
 
-def _rolling_percentile(values: pd.Series, window_days: int | None) -> pd.Series:
-    """
-    计算每一天 value 在窗口中的百分位（0-100）。
-    """
-    result = pd.Series(index=values.index, dtype="float64")
-
-    for i in range(len(values)):
-        current_value = values.iloc[i]
-        if pd.isna(current_value):
-            continue
-
-        if window_days is None:
-            window = values.iloc[: i + 1]
-        else:
-            start = max(0, i - window_days + 1)
-            window = values.iloc[start : i + 1]
-
-        window = window.dropna()
-        if window.empty:
-            continue
-
-        result.iloc[i] = float(percentileofscore(window.to_numpy(), current_value, kind="rank"))
-
-    return result
-
-
 def build_with_percentiles(df: pd.DataFrame) -> pd.DataFrame:
     """
     基于 value 计算三个百分位字段。
     """
     if df.empty:
-        return pd.DataFrame(columns=["date", "value", "classification", "fg_pct_1y", "fg_pct_4y", "fg_pct_all"])
+        return pd.DataFrame(
+            columns=[
+                "date",
+                "value",
+                "classification",
+                "fg_pct_1y",
+                "fg_pct_2y",
+                "fg_pct_3y",
+                "fg_pct_4y",
+                "fg_pct_all",
+            ]
+        )
 
     out = df.copy()
-    out["fg_pct_1y"] = _rolling_percentile(out["value"], window_days=365)
-    out["fg_pct_4y"] = _rolling_percentile(out["value"], window_days=1460)
-    out["fg_pct_all"] = _rolling_percentile(out["value"], window_days=None)
+    add_multi_year_percentiles(out, "value", "fg", years=(1, 2, 3, 4))
+    # 列名保持 fg_pct_1y 格式（prefix=fg -> fg_pct_1y）
+    out["fg_pct_all"] = rolling_percentile_series(out["value"], None)
     return out
 
 
@@ -159,6 +144,8 @@ def _save_rows(df: pd.DataFrame) -> int:
                     "value": int(row["value"]) if pd.notna(row["value"]) else None,
                     "classification": row["classification"],
                     "fg_pct_1y": float(row["fg_pct_1y"]) if pd.notna(row["fg_pct_1y"]) else None,
+                    "fg_pct_2y": float(row["fg_pct_2y"]) if pd.notna(row["fg_pct_2y"]) else None,
+                    "fg_pct_3y": float(row["fg_pct_3y"]) if pd.notna(row["fg_pct_3y"]) else None,
                     "fg_pct_4y": float(row["fg_pct_4y"]) if pd.notna(row["fg_pct_4y"]) else None,
                     "fg_pct_all": float(row["fg_pct_all"]) if pd.notna(row["fg_pct_all"]) else None,
                 },
@@ -183,11 +170,12 @@ def fetch_full_history() -> int:
 
 def fetch_incremental() -> int:
     """
-    增量更新：
-    1) 读取数据库最新日期
+    增量更新（API 仍拉全量，但入库对「所有日期」做 upsert）：
+
+    1) 读取数据库最新日期（仅用于日志说明）
     2) 从 API 拉全量（官方接口不支持按日期过滤）
-    3) 仅把“最新日期之后”的新记录入库
-    4) 但百分位需要依赖历史，所以会先在内存重算全部，再筛选新日期写入
+    3) 在内存里对全历史重算 1Y~4Y + ALL 百分位
+    4) 对所有行 upsert（保证新增百分位列后，旧日期也会被回填，而不会只写尾部新日期）
     """
     init_db()
     print("[开始] 增量更新恐惧贪婪指数...")
@@ -201,18 +189,15 @@ def fetch_incremental() -> int:
         return 0
 
     full_df = build_with_percentiles(base_df)
+    written = _save_rows(full_df)
 
+    api_max = str(full_df["date"].max())
     if latest_date is None:
-        print("[提示] 数据库暂无历史，自动执行全量写入。")
-        return _save_rows(full_df)
-
-    inc_df = full_df[full_df["date"] > latest_date].copy()
-    if inc_df.empty:
-        print(f"[完成] 数据已是最新，数据库最新日期：{latest_date}")
-        return 0
-
-    written = _save_rows(inc_df)
-    print(f"[完成] 增量写入完成，新增 {written} 条（数据库之前最新日期：{latest_date}）")
+        print(f"[提示] 数据库原无历史；本次全量 upsert 共 {written} 条（API 最新日期 {api_max}）。")
+    elif api_max > latest_date:
+        print(f"[完成] 已 upsert {written} 条；API 最新日期 {api_max}（数据库原最新：{latest_date}）。")
+    else:
+        print(f"[完成] API 日期未推进（{api_max}），已对全部 {written} 条重算并刷新百分位（含多窗口列）。")
     return written
 
 

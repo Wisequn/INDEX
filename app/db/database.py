@@ -44,6 +44,15 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
 
+    # 给已存在的 SQLite 表幂等补列（create_all 不会自动 ALTER）
+    from app.db.schema_migrations import apply_multiyear_percentile_migrations
+
+    applied = apply_multiyear_percentile_migrations(engine)
+    if applied:
+        # 仅在确有变更时打印，避免每日调度刷屏
+        for ddl in applied:
+            print(f"[schema] {ddl}")
+
 
 def upsert_by_date(session: Session, model: Any, row_data: dict[str, Any]) -> None:
     """

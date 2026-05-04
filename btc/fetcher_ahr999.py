@@ -23,11 +23,12 @@ from urllib.request import Request, urlopen
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from scipy.stats import gmean, percentileofscore
+from scipy.stats import gmean
 from sqlalchemy import func, select
 
 from app.db.database import SessionLocal, init_db, upsert_by_date
 from app.db.models import BtcAhr999
+from btc.percentile_common import ROLLING_PERCENTILE_YEAR_DAYS, rolling_percentile_series
 
 # 目标时间范围：按你的要求，从 2015 年开始
 START_DATE = "2015-01-01"
@@ -89,32 +90,17 @@ def _url_get_json_with_retry(
 
 def _compute_percentiles(df: pd.DataFrame) -> pd.DataFrame:
     """
-    计算 Ahr999 的 1y / 4y / all 百分位。
-    百分位结果按你的要求保留两位小数。
+    计算 Ahr999 的 1Y / 2Y / 3Y / 4Y / 全历史 滚动百分位。
+
+    百分位结果保留两位小数（与历史行为一致，便于前端展示）。
     """
     out = df.copy()
     values = out["ahr999_value"]
 
-    def rolling_pct(window_days: int | None) -> pd.Series:
-        result = pd.Series(index=values.index, dtype="float64")
-        for i in range(len(values)):
-            v = values.iloc[i]
-            if pd.isna(v):
-                continue
-            if window_days is None:
-                w = values.iloc[: i + 1]
-            else:
-                start = max(0, i - window_days + 1)
-                w = values.iloc[start : i + 1]
-            w = w.dropna()
-            if w.empty:
-                continue
-            result.iloc[i] = percentileofscore(w.to_numpy(), v, kind="rank")
-        return result
+    for y, days in ROLLING_PERCENTILE_YEAR_DAYS.items():
+        out[f"ahr999_pct_{y}y"] = rolling_percentile_series(values, days).round(2)
 
-    out["ahr999_pct_1y"] = rolling_pct(365).round(2)
-    out["ahr999_pct_4y"] = rolling_pct(1460).round(2)
-    out["ahr999_pct_all"] = rolling_pct(None).round(2)
+    out["ahr999_pct_all"] = rolling_percentile_series(values, None).round(2)
     return out
 
 
@@ -270,7 +256,7 @@ def build_ahr999_history() -> tuple[pd.DataFrame, str]:
     """
     构建 Ahr999 历史数据。
     返回：
-    - DataFrame（含 date, ahr999_value, 三个百分位）
+    - DataFrame（含 date、ahr999_value、1Y~4Y 与 ALL 滚动百分位）
     - 数据来源说明字符串
     """
     api_key = os.getenv("CG_API_KEY", "").strip()
@@ -311,6 +297,8 @@ def _save_to_db(df: pd.DataFrame) -> int:
                     "date": row["date"],
                     "ahr999_value": float(row["ahr999_value"]),
                     "ahr999_pct_1y": float(row["ahr999_pct_1y"]) if pd.notna(row["ahr999_pct_1y"]) else None,
+                    "ahr999_pct_2y": float(row["ahr999_pct_2y"]) if pd.notna(row["ahr999_pct_2y"]) else None,
+                    "ahr999_pct_3y": float(row["ahr999_pct_3y"]) if pd.notna(row["ahr999_pct_3y"]) else None,
                     "ahr999_pct_4y": float(row["ahr999_pct_4y"]) if pd.notna(row["ahr999_pct_4y"]) else None,
                     "ahr999_pct_all": float(row["ahr999_pct_all"]) if pd.notna(row["ahr999_pct_all"]) else None,
                 },
@@ -334,27 +322,30 @@ def fetch_full_history() -> tuple[int, str]:
 
 def fetch_incremental() -> tuple[int, str]:
     """
-    增量更新：
-    - 读取数据库最新日期
-    - 重建完整序列（保证百分位一致）
-    - 仅写入“最新日期之后”的新数据
+    增量更新（与恐惧贪婪一致：全表重算后整表 upsert）：
+
+    - 读取数据库最新日期（仅用于日志）
+    - 重建完整序列（保证多窗口百分位一致）
+    - 对所有日期 upsert（新百分位列上线后也能回填历史行）
     """
     init_db()
     with SessionLocal() as session:
         latest_date = session.scalar(select(func.max(BtcAhr999.date)))
 
     df, source_used = build_ahr999_history()
-    if latest_date is None:
-        written = _save_to_db(df)
-        return written, source_used
-
-    inc_df = df[df["date"] > latest_date].copy()
-    if inc_df.empty:
-        print(f"[完成] Ahr999 已是最新（数据库最新日期：{latest_date}）。")
+    if df.empty:
+        print("[完成] Ahr999 序列为空，跳过写入。")
         return 0, source_used
 
-    written = _save_to_db(inc_df)
-    print(f"[完成] 增量写入 {written} 条（数据库之前最新日期：{latest_date}）。")
+    written = _save_to_db(df)
+
+    api_max = str(df["date"].max())
+    if latest_date is None:
+        print(f"[完成] Ahr999 首次写入 {written} 条。数据来源：{source_used}")
+    elif api_max and api_max > latest_date:
+        print(f"[完成] Ahr999 已 upsert {written} 条；序列最新 {api_max}（数据库原最新：{latest_date}）。来源：{source_used}")
+    else:
+        print(f"[完成] Ahr999 日期未推进，已对 {written} 条全量刷新百分位。来源：{source_used}")
     return written, source_used
 
 
