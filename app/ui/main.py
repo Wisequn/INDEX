@@ -16,10 +16,12 @@ import plotly.graph_objects as go
 import streamlit as st
 from sqlalchemy import select
 
-# 兼容“从任意目录启动 streamlit”
+# 兼容“从任意目录启动 streamlit”：项目根必须排在 sys.path 最前，避免误 import 到别处同名 app/
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+_ROOT_STR = str(PROJECT_ROOT)
+while _ROOT_STR in sys.path:
+    sys.path.remove(_ROOT_STR)
+sys.path.insert(0, _ROOT_STR)
 
 from app.db.database import SessionLocal, init_db
 from app.db.models import Btc200wMa, Btc4yMa, BtcAhr999, BtcFearGreed, BtcPrice, BtcRsi, BtcRsiPercentile
@@ -292,13 +294,6 @@ def _build_figure_normalized(df: pd.DataFrame, selected_series: list[str], norma
 st.set_page_config(page_title="BTC- INDEX分析", layout="wide")
 st.title("BTC- INDEX分析")
 st.caption("默认展示最近1年；可在图上拖拽缩放查看任意时间段。")
-
-if not hasattr(BtcRsiPercentile, "rsi6_pct_2y"):
-    st.warning(
-        "当前加载的 `app/db/models.py` 仍是旧版本（缺少多窗口百分位列）。"
-        "请在项目根执行 `git pull` 后**完全退出并重启** Streamlit；"
-        "若已拉代码，请确认保存了 models.py 且没有开两份不同目录的 Index。"
-    )
 
 df_all = _load_all_history()
 if df_all.empty:
