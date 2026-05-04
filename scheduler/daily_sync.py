@@ -139,7 +139,15 @@ def run_daily_sync(test: bool = False) -> list[dict[str, Any]]:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Index Monitor 每日同步")
+    parser = argparse.ArgumentParser(
+        description="Index Monitor 每日同步",
+        epilog=(
+            "示例（每行单独执行；勿把「# 中文说明」粘在命令后面，否则 # 会被当成参数报错）：\n"
+            "  python3 -m scheduler.daily_sync --test\n"
+            "  python3 -m scheduler.daily_sync"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--test",
         action="store_true",
