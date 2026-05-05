@@ -43,7 +43,9 @@ require_cmd() {
 
 append_caddy_block_if_missing() {
   local tmp_block
+  local tmp_main
   tmp_block="$(mktemp)"
+  tmp_main="$(mktemp)"
 
   cat > "$tmp_block" <<EOF
 
@@ -60,13 +62,20 @@ ${SERVICE_TAG} END
 EOF
 
   if rg -q "${SERVICE_TAG} BEGIN" "$CADDY_MAIN_FILE"; then
-    ok "检测到已有 quant919 Caddy 配置块（跳过追加）"
-  else
-    cat "$tmp_block" >> "$CADDY_MAIN_FILE"
-    ok "已追加 quant919 Caddy 配置块"
+    awk -v begin="${SERVICE_TAG} BEGIN" -v end="${SERVICE_TAG} END" '
+      $0 == begin {in_block=1; next}
+      $0 == end {in_block=0; next}
+      !in_block {print}
+    ' "$CADDY_MAIN_FILE" > "$tmp_main"
+    mv "$tmp_main" "$CADDY_MAIN_FILE"
+    ok "已移除旧的 quant919 Caddy 配置块"
   fi
 
+  cat "$tmp_block" >> "$CADDY_MAIN_FILE"
+  ok "已写入 quant919 Caddy 配置块（无登录认证）"
+
   rm -f "$tmp_block"
+  rm -f "$tmp_main"
 }
 
 setup_crontab() {
