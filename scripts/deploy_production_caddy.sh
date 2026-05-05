@@ -14,7 +14,7 @@ set -euo pipefail
 # 设计原则：
 # - 幂等：可重复执行，不会越跑越乱
 # - 可观测：关键步骤统一输出 ✅ / ❌
-# - 安全：默认通过 Caddy basicauth 做访问保护（Caddy 2 指令名无下划线，勿写成 basic_auth）
+# - 安全：Streamlit 仅监听 127.0.0.1，对外仅经 Caddy 反代暴露
 # - 可用性：crontab 每 5 分钟执行 scripts/watchdog_streamlit.sh，本机探测进程与 HTTP，挂了自动拉起
 #
 # Python 3.14 注意事项：
@@ -32,10 +32,6 @@ STREAMLIT_LOG="$LOG_DIR/streamlit_8504.log"
 DAILY_LOG="$LOG_DIR/daily_sync.log"
 SERVICE_TAG="# index-monitor-quant919"
 
-# 基础认证用户名和明文密码可通过环境变量传入（建议生产改强密码）
-BASIC_AUTH_USER="${BASIC_AUTH_USER:-quantadmin}"
-BASIC_AUTH_PASSWORD="${BASIC_AUTH_PASSWORD:-ChangeMe_123456!}"
-
 ok() { echo "✅ $1"; }
 fail() { echo "❌ $1"; exit 1; }
 info() { echo "ℹ️  $1"; }
@@ -46,7 +42,6 @@ require_cmd() {
 }
 
 append_caddy_block_if_missing() {
-  local hashed_password="$1"
   local tmp_block
   tmp_block="$(mktemp)"
 
@@ -55,9 +50,6 @@ append_caddy_block_if_missing() {
 ${SERVICE_TAG} BEGIN
 www.quant919.com {
     encode zstd gzip
-    basicauth {
-        ${BASIC_AUTH_USER} ${hashed_password}
-    }
     reverse_proxy 127.0.0.1:${STREAMLIT_PORT}
     log {
         output file /var/log/caddy/quant919_access.log
@@ -144,12 +136,8 @@ main() {
   pip install -r requirements.txt || fail "安装依赖失败"
   ok "依赖安装完成"
 
-  # 2) 配置 Caddy（basicauth + reverse_proxy）
-  local_hash="$(caddy hash-password --plaintext "$BASIC_AUTH_PASSWORD" | tr -d '\n')"
-  [ -n "$local_hash" ] || fail "生成 Caddy 密码哈希失败"
-  ok "basicauth 密码哈希生成完成"
-
-  append_caddy_block_if_missing "$local_hash"
+  # 2) 配置 Caddy（仅 reverse_proxy）
+  append_caddy_block_if_missing
 
   caddy validate --config "$CADDY_MAIN_FILE" || fail "Caddy 配置校验失败"
   ok "Caddy 配置校验通过"
@@ -167,8 +155,6 @@ main() {
   echo
   ok "生产部署完成"
   echo "访问地址：https://www.quant919.com"
-  echo "登录用户：${BASIC_AUTH_USER}"
-  echo "登录密码：${BASIC_AUTH_PASSWORD}"
   echo
   echo "日志查看建议："
   echo "  - Streamlit 日志：tail -f ${STREAMLIT_LOG}"

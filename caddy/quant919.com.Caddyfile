@@ -5,17 +5,10 @@
 #
 # 使用说明：
 # 1) 把本文件内容合并到 /etc/caddy/Caddyfile
-# 2) 把下面 basicauth 里的密码哈希替换成真实值
-#    生成命令：caddy hash-password --plaintext "你的密码"
 
 www.quant919.com {
     # Caddy 默认会自动申请和续期 HTTPS 证书
     encode zstd gzip
-
-    # 简单访问密码保护（基础认证）
-    basicauth {
-        quantadmin REPLACE_WITH_CADDY_HASHED_PASSWORD
-    }
 
     # 反向代理到本机 Streamlit（仅监听 127.0.0.1:8504）
     reverse_proxy 127.0.0.1:8504
