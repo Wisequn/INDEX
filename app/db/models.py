@@ -5,6 +5,10 @@ SQLite ORM 数据表定义（Index Monitor - BTC 专用）。
 1) 所有表都使用 date 作为主键，格式固定为 YYYY-MM-DD（字符串）
 2) date 字段同时加索引，方便按日期范围查询
 3) 每个字段都写中文注释，便于后续维护
+
+百分位说明：
+- 库中只存 RSI / 恐惧贪婪 / Ahr999 等「原始指标值」
+- 多窗口历史百分位由 Streamlit 在内存中动态计算（见 app/ui/chart_history.py）
 """
 
 from sqlalchemy import Column, DateTime, Float, Integer, String, UniqueConstraint
@@ -27,7 +31,7 @@ class BtcPrice(Base):
 
 
 class BtcRsi(Base):
-    """BTC RSI 指标表。"""
+    """BTC RSI 指标表（仅 rsi6 / rsi12 原始值）。"""
 
     __tablename__ = "btc_rsi"
 
@@ -36,51 +40,23 @@ class BtcRsi(Base):
     rsi12 = Column(Float, nullable=True, comment="12日 RSI 数值")
 
 
-class BtcRsiPercentile(Base):
-    """BTC RSI 历史百分位表。"""
-
-    __tablename__ = "btc_rsi_percentile"
-
-    date = Column(String(10), primary_key=True, index=True, comment="日期，格式 YYYY-MM-DD")
-    rsi6_pct_1y = Column(Float, nullable=True, comment="RSI6 在过去1年历史数据中的百分位（0-100）")
-    rsi6_pct_2y = Column(Float, nullable=True, comment="RSI6 在过去2年历史数据中的百分位（0-100）")
-    rsi6_pct_3y = Column(Float, nullable=True, comment="RSI6 在过去3年历史数据中的百分位（0-100）")
-    rsi6_pct_4y = Column(Float, nullable=True, comment="RSI6 在过去4年历史数据中的百分位（0-100）")
-    rsi6_pct_all = Column(Float, nullable=True, comment="RSI6 在全部历史数据中的百分位（0-100）")
-    rsi12_pct_1y = Column(Float, nullable=True, comment="RSI12 在过去1年历史数据中的百分位（0-100）")
-    rsi12_pct_2y = Column(Float, nullable=True, comment="RSI12 在过去2年历史数据中的百分位（0-100）")
-    rsi12_pct_3y = Column(Float, nullable=True, comment="RSI12 在过去3年历史数据中的百分位（0-100）")
-    rsi12_pct_4y = Column(Float, nullable=True, comment="RSI12 在过去4年历史数据中的百分位（0-100）")
-    rsi12_pct_all = Column(Float, nullable=True, comment="RSI12 在全部历史数据中的百分位（0-100）")
-
-
 class BtcFearGreed(Base):
-    """BTC 恐惧贪婪指数表。"""
+    """BTC 恐惧贪婪指数表（仅 API 原值）。"""
 
     __tablename__ = "btc_fear_greed"
 
     date = Column(String(10), primary_key=True, index=True, comment="日期，格式 YYYY-MM-DD")
     value = Column(Integer, nullable=True, comment="当日恐惧贪婪指数值（0-100整数）")
     classification = Column(String(30), nullable=True, comment="文字描述：Extreme Fear/Fear/Neutral/Greed/Extreme Greed")
-    fg_pct_1y = Column(Float, nullable=True, comment="value 在过去1年历史数据中的百分位（0-100）")
-    fg_pct_2y = Column(Float, nullable=True, comment="value 在过去2年历史数据中的百分位（0-100）")
-    fg_pct_3y = Column(Float, nullable=True, comment="value 在过去3年历史数据中的百分位（0-100）")
-    fg_pct_4y = Column(Float, nullable=True, comment="value 在过去4年历史数据中的百分位（0-100）")
-    fg_pct_all = Column(Float, nullable=True, comment="value 在全部历史数据中的百分位（0-100）")
 
 
 class BtcAhr999(Base):
-    """BTC Ahr999 指标表。"""
+    """BTC Ahr999 指标表（仅 ahr999_value 原始值）。"""
 
     __tablename__ = "btc_ahr999"
 
     date = Column(String(10), primary_key=True, index=True, comment="日期，格式 YYYY-MM-DD")
     ahr999_value = Column(Float, nullable=True, comment="当日 Ahr999 指标数值")
-    ahr999_pct_1y = Column(Float, nullable=True, comment="ahr999_value 在过去1年历史数据中的百分位（0-100）")
-    ahr999_pct_2y = Column(Float, nullable=True, comment="ahr999_value 在过去2年历史数据中的百分位（0-100）")
-    ahr999_pct_3y = Column(Float, nullable=True, comment="ahr999_value 在过去3年历史数据中的百分位（0-100）")
-    ahr999_pct_4y = Column(Float, nullable=True, comment="ahr999_value 在过去4年历史数据中的百分位（0-100）")
-    ahr999_pct_all = Column(Float, nullable=True, comment="ahr999_value 在全部历史数据中的百分位（0-100）")
 
 
 class Btc4yMa(Base):
@@ -91,9 +67,6 @@ class Btc4yMa(Base):
     date = Column(String(10), primary_key=True, index=True, comment="日期，格式 YYYY-MM-DD")
     ma_value = Column(Float, nullable=True, comment="当日 4年移动平均线数值（1458日均线）")
     price_to_4y_ma = Column(Float, nullable=True, comment="当日收盘价 / 4年均线 的倍数")
-    p4yma_pct_1y = Column(Float, nullable=True, comment="price_to_4y_ma 在过去1年历史数据中的百分位（0-100）")
-    p4yma_pct_4y = Column(Float, nullable=True, comment="price_to_4y_ma 在过去4年历史数据中的百分位（0-100）")
-    p4yma_pct_all = Column(Float, nullable=True, comment="price_to_4y_ma 在全部历史数据中的百分位（0-100）")
 
 
 class Btc200wMa(Base):
@@ -104,9 +77,6 @@ class Btc200wMa(Base):
     date = Column(String(10), primary_key=True, index=True, comment="日期，格式 YYYY-MM-DD")
     ma_value = Column(Float, nullable=True, comment="当日 200周移动平均线数值（1400日均线）")
     price_to_200w_ma = Column(Float, nullable=True, comment="当日收盘价 / 200周均线 的倍数")
-    p200wma_pct_1y = Column(Float, nullable=True, comment="price_to_200w_ma 在过去1年历史数据中的百分位（0-100）")
-    p200wma_pct_4y = Column(Float, nullable=True, comment="price_to_200w_ma 在过去4年历史数据中的百分位（0-100）")
-    p200wma_pct_all = Column(Float, nullable=True, comment="price_to_200w_ma 在全部历史数据中的百分位（0-100）")
 
 
 class BtcRiskScore(Base):
@@ -143,4 +113,20 @@ class MarketData(Base):
 
     __table_args__ = (
         UniqueConstraint("market", "symbol", "timestamp", name="uq_market_symbol_timestamp"),
+    )
+
+
+class RealtimeValue(Base):
+    """指标实时值缓存表（默认窗口 2Y）。"""
+
+    __tablename__ = "realtime_values"
+
+    id = Column(Integer, primary_key=True, index=True)
+    indicator_code = Column(String(64), nullable=False, index=True, comment="指标代码")
+    current_value = Column(Float, nullable=True, comment="最新指标值")
+    update_time = Column(String(19), nullable=False, comment="更新时间，格式 YYYY-MM-DD HH:MM:SS")
+    window = Column(String(16), nullable=False, default="2Y", comment="窗口标识，默认 2Y")
+
+    __table_args__ = (
+        UniqueConstraint("indicator_code", "window", name="uq_realtime_indicator_window"),
     )

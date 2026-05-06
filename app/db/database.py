@@ -44,10 +44,10 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
 
-    # 给已存在的 SQLite 表幂等补列（create_all 不会自动 ALTER）
-    from app.db.schema_migrations import apply_multiyear_percentile_migrations
+    # 清理已废弃的「预计算百分位」存库列 / 表（create_all 不会自动删列）
+    from app.db.schema_migrations import apply_legacy_percentile_cleanup
 
-    applied = apply_multiyear_percentile_migrations(engine)
+    applied = apply_legacy_percentile_cleanup(engine)
     if applied:
         # 仅在确有变更时打印，避免每日调度刷屏
         for ddl in applied:
@@ -88,3 +88,28 @@ def bulk_upsert_by_date(session: Session, model: Any, rows: list[dict[str, Any]]
 
     for row in rows:
         upsert_by_date(session=session, model=model, row_data=row)
+
+
+def upsert_by_unique_keys(
+    session: Session,
+    model: Any,
+    row_data: dict[str, Any],
+    unique_keys: list[str],
+) -> None:
+    """
+    通用 upsert（按 unique_keys 指定的唯一键集合）。
+    """
+    if not unique_keys:
+        raise ValueError("upsert_by_unique_keys 需要至少一个唯一键字段")
+    for k in unique_keys:
+        if k not in row_data:
+            raise ValueError(f"upsert_by_unique_keys 缺少唯一键字段: {k}")
+
+    stmt = sqlite_insert(model).values(**row_data)
+    update_cols = {
+        col.name: stmt.excluded[col.name]
+        for col in model.__table__.columns
+        if col.name not in set(unique_keys)
+    }
+    stmt = stmt.on_conflict_do_update(index_elements=unique_keys, set_=update_cols)
+    session.execute(stmt)

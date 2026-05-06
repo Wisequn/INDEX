@@ -23,6 +23,7 @@ sys.path.insert(0, _ROOT_STR)
 
 from app.db.database import init_db
 from app.ui.chart_history import load_full_chart_dataframe
+from btc.realtime import get_realtime_values
 from btc.percentile_runtime import calculate_dynamic_percentile
 
 # 建表 + 幂等清理旧百分位列（@st.cache_data 内部也会 init_db，此处保证首屏前迁移已执行）
@@ -889,20 +890,47 @@ for cfg in THRESHOLD_MARKER_SPECS:
         )
 
 st.subheader("指标说明表")
+_rv_cols = st.columns([1, 1, 8], gap="small")
+with _rv_cols[0]:
+    _window = st.selectbox("实时窗口", options=["2Y"], index=0, key="rt_window", label_visibility="collapsed")
+with _rv_cols[1]:
+    if st.button("刷新当前值", use_container_width=True):
+        st.rerun()
+
+realtime_map = get_realtime_values(window=_window)
+
+
+def _fmt_current(indicator_code: str) -> str:
+    row = realtime_map.get(indicator_code)
+    if not row:
+        return "-"
+    v = row.get("current_value")
+    if v is None:
+        return "-"
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        return "-"
+    # 百分位类按 0~100 展示两位；其余按四位小数
+    if indicator_code in {"rsi6_pct_ui", "rsi12_pct_ui", "fg_pct_ui", "ahr999_pct_ui"}:
+        return f"{fv:.2f}"
+    return f"{fv:.4f}"
+
+
 info_rows = [
-    {"指标代码": "close", "中文名称": "BTC价格", "指标解释": "比特币当日收盘价（USD）"},
-    {"指标代码": "rsi6", "中文名称": "RSI6", "指标解释": "6日相对强弱指标，反映短周期动量"},
-    {"指标代码": "rsi12", "中文名称": "RSI12", "指标解释": "12日相对强弱指标，反映中短周期动量"},
-    {"指标代码": "rsi6_pct_ui", "中文名称": "RSI6%", "指标解释": "上图日期范围内自左向右扩展窗口，用 calculate_dynamic_percentile 算的百分位（0～100）"},
-    {"指标代码": "rsi12_pct_ui", "中文名称": "RSI12%", "指标解释": "同上，基于 RSI12 原值列"},
-    {"指标代码": "value", "中文名称": "恐惧贪婪", "指标解释": "恐惧贪婪指数原值（0-100）"},
-    {"指标代码": "fg_pct_ui", "中文名称": "恐惧贪婪%", "指标解释": "同上，基于恐惧贪婪原值列"},
-    {"指标代码": "ahr999_value", "中文名称": "Ahr999", "指标解释": "Ahr999估值指标（低于0.45偏低估，高于1.2偏高估）"},
-    {"指标代码": "ahr999_pct_ui", "中文名称": "Ahr999%", "指标解释": "同上，基于 Ahr999 原值列"},
-    {"指标代码": "ma_value(4y)", "中文名称": "4年均线", "指标解释": "1458日简单移动平均线"},
-    {"指标代码": "price_to_4y_ma", "中文名称": "价格/4年均线", "指标解释": "当前价格相对4年均线的倍数"},
-    {"指标代码": "ma_value(200w)", "中文名称": "200周均线", "指标解释": "1400日简单移动平均线"},
-    {"指标代码": "price_to_200w_ma", "中文名称": "价格/200周均线", "指标解释": "当前价格相对200周均线的倍数"},
+    {"指标代码": "close", "中文名称": "BTC价格", "当前值": _fmt_current("close"), "指标解释": "比特币当日收盘价（USD）"},
+    {"指标代码": "rsi6", "中文名称": "RSI6", "当前值": _fmt_current("rsi6"), "指标解释": "6日相对强弱指标，反映短周期动量"},
+    {"指标代码": "rsi12", "中文名称": "RSI12", "当前值": _fmt_current("rsi12"), "指标解释": "12日相对强弱指标，反映中短周期动量"},
+    {"指标代码": "rsi6_pct_ui", "中文名称": "RSI6%（2Y）", "当前值": _fmt_current("rsi6_pct_ui"), "指标解释": "最近2年窗口（730天）按当前 RSI6 动态计算的百分位（0～100）"},
+    {"指标代码": "rsi12_pct_ui", "中文名称": "RSI12%（2Y）", "当前值": _fmt_current("rsi12_pct_ui"), "指标解释": "最近2年窗口（730天）按当前 RSI12 动态计算的百分位（0～100）"},
+    {"指标代码": "value", "中文名称": "恐惧贪婪", "当前值": _fmt_current("value"), "指标解释": "恐惧贪婪指数原值（0-100）"},
+    {"指标代码": "fg_pct_ui", "中文名称": "恐惧贪婪%（2Y）", "当前值": _fmt_current("fg_pct_ui"), "指标解释": "最近2年窗口（730天）按当前恐惧贪婪值动态计算的百分位（0～100）"},
+    {"指标代码": "ahr999_value", "中文名称": "Ahr999", "当前值": _fmt_current("ahr999_value"), "指标解释": "Ahr999估值指标（低于0.45偏低估，高于1.2偏高估）"},
+    {"指标代码": "ahr999_pct_ui", "中文名称": "Ahr999%（2Y）", "当前值": _fmt_current("ahr999_pct_ui"), "指标解释": "最近2年窗口（730天）按当前 Ahr999 动态计算的百分位（0～100）"},
+    {"指标代码": "ma_value(4y)", "中文名称": "4年均线", "当前值": _fmt_current("ma_value(4y)"), "指标解释": "1458日简单移动平均线"},
+    {"指标代码": "price_to_4y_ma", "中文名称": "价格/4年均线", "当前值": _fmt_current("price_to_4y_ma"), "指标解释": "当前价格相对4年均线的倍数"},
+    {"指标代码": "ma_value(200w)", "中文名称": "200周均线", "当前值": _fmt_current("ma_value(200w)"), "指标解释": "1400日简单移动平均线"},
+    {"指标代码": "price_to_200w_ma", "中文名称": "价格/200周均线", "当前值": _fmt_current("price_to_200w_ma"), "指标解释": "当前价格相对200周均线的倍数"},
 ]
 st.dataframe(pd.DataFrame(info_rows), use_container_width=True, hide_index=True)
 

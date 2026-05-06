@@ -22,7 +22,7 @@ fi
 # 功能（default 模式）：
 # 1) 创建虚拟环境并安装依赖
 # 2) 首次全量初始化数据
-# 3) 配置每日定时任务（08:15 同步 + 08:40 备份）
+# 3) 配置定时任务（08:15 同步 + 每10分钟实时值 + 08:40 备份）
 # 4) 后台启动 Streamlit
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -47,12 +47,14 @@ python main.py
 
 echo "[3/4] 配置 crontab..."
 CRON_TMP="$(mktemp)"
-crontab -l 2>/dev/null | rg -v "scheduler.daily_sync|backup.sh" > "$CRON_TMP" || true
+crontab -l 2>/dev/null | rg -v "scheduler.daily_sync|scheduler.realtime_update|backup.sh" > "$CRON_TMP" || true
 
 # 每天 08:15 执行增量同步（UTC+8）
 echo "15 8 * * * cd \"$PROJECT_DIR\" && \"$VENV_DIR/bin/python\" -m scheduler.daily_sync >> \"$PROJECT_DIR/logs/daily_sync.log\" 2>&1" >> "$CRON_TMP"
 # 每天 08:40 执行数据库备份
 echo "40 8 * * * cd \"$PROJECT_DIR\" && /usr/bin/env bash \"$PROJECT_DIR/backup.sh\" >> \"$PROJECT_DIR/logs/backup.log\" 2>&1" >> "$CRON_TMP"
+# 每 10 分钟更新一次 realtime_values（用于指标说明表当前值）
+echo "*/10 * * * * cd \"$PROJECT_DIR\" && \"$VENV_DIR/bin/python\" -m scheduler.realtime_update >> \"$PROJECT_DIR/logs/realtime_update.log\" 2>&1" >> "$CRON_TMP"
 
 crontab "$CRON_TMP"
 rm -f "$CRON_TMP"

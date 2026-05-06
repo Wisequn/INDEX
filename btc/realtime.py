@@ -3,13 +3,13 @@
 
 功能目标：
 1) 每 5 分钟从币安获取一次 BTC 实时价格
-2) 用“实时价格 + 数据库历史数据”计算当前指标值
+2) 用「实时价格 + 数据库历史数据」计算当前指标值
 3) 缓存在内存中，供 Streamlit 页面快速读取
 
 说明：
 - 本模块不写数据库
-- 只返回内存里的实时结果字典
-- 返回中附带 `percentiles_eod`：来自库中「最近一个完整交易日」的多窗口百分位（与当日实时 RSI 可对照）
+- percentiles_eod：根据库中全历史序列，对「最近一个有效 RSI/F&G/Ahr999 点」
+  用与前端一致的滚动窗口动态算出多窗口百分位（不入库）
 """
 
 from __future__ import annotations
@@ -26,19 +26,15 @@ import pandas as pd
 from sqlalchemy import select
 
 from app.db.database import SessionLocal
-from app.db.models import Btc200wMa, Btc4yMa, BtcAhr999, BtcFearGreed, BtcPrice, BtcRsiPercentile
+from app.db.models import Btc200wMa, Btc4yMa, BtcAhr999, BtcFearGreed, BtcPrice, BtcRsi, RealtimeValue
 from btc.indicators_rsi import compute_wilder_rsi
+from btc.percentile_runtime import build_eod_percentile_api_dict
 
-# 币安实时价格接口（无需 Key）
 BINANCE_TICKER_URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
 
-# 缓存有效期：5分钟
 CACHE_TTL_SECONDS = 5 * 60
-
-# 线程刷新间隔：5分钟
 REFRESH_INTERVAL_SECONDS = 5 * 60
 
-# 模块级缓存对象（只在内存存在）
 _cache_data: dict[str, Any] | None = None
 _cache_timestamp: float = 0.0
 _cache_lock = threading.Lock()
@@ -46,10 +42,7 @@ _refresh_thread_started = False
 
 
 def _fetch_realtime_price() -> float:
-    """
-    从币安读取当前 BTCUSDT 实时价格。
-    含 3 次重试，每次失败等待 5 秒。
-    """
+    """从币安读取当前 BTCUSDT 实时价格（含重试）。"""
     max_retries = 3
     ssl_context = ssl.create_default_context()
     insecure_ssl_context = ssl._create_unverified_context()
@@ -62,7 +55,6 @@ def _fetch_realtime_price() -> float:
                 payload = json.loads(resp.read().decode("utf-8"))
                 return float(payload["price"])
         except Exception as exc:
-            # 某些网络环境可能有证书链问题，自动回退
             if "CERTIFICATE_VERIFY_FAILED" in str(exc):
                 try:
                     with urlopen(BINANCE_TICKER_URL, timeout=20, context=insecure_ssl_context) as resp:
@@ -85,27 +77,17 @@ def _fetch_realtime_price() -> float:
 
 def _compute_realtime_metrics(price_now: float) -> dict[str, Any]:
     """
-    用实时价格计算当前指标值。
-
-    计算逻辑：
-    - RSI6/RSI12：读取最近200天 close，再把实时价格拼到末尾，重算 RSI
-    - price_to_4y_ma：实时价格 / 最新 4y ma_value
-    - price_to_200w_ma：实时价格 / 最新 200w ma_value
-    - ahr999：用“最新日 ahr999 与 最新收盘价”的比例外推实时值
-      （即 ahr999_now = ahr999_latest * price_now / close_latest）
+    用实时价格计算当前指标值；EOD 百分位从库中全历史序列动态计算。
     """
     with SessionLocal() as session:
-        # 1) 读取最近 200 天收盘价，用于实时 RSI
         close_rows = session.execute(select(BtcPrice.date, BtcPrice.close).order_by(BtcPrice.date.desc()).limit(200)).all()
-        close_rows = list(reversed(close_rows))  # 转回升序
+        close_rows = list(reversed(close_rows))
         close_series = pd.Series([float(r.close) for r in close_rows], dtype="float64")
 
-        # 把实时价格当作“当前时刻最新一条”拼接到末尾
         close_with_now = pd.concat([close_series, pd.Series([price_now], dtype="float64")], ignore_index=True)
         rsi6_now = float(compute_wilder_rsi(close_with_now, period=6).iloc[-1])
         rsi12_now = float(compute_wilder_rsi(close_with_now, period=12).iloc[-1])
 
-        # 2) 读取均线表最新值
         latest_4y = session.execute(select(Btc4yMa).order_by(Btc4yMa.date.desc()).limit(1)).scalar_one_or_none()
         latest_200w = session.execute(select(Btc200wMa).order_by(Btc200wMa.date.desc()).limit(1)).scalar_one_or_none()
 
@@ -117,7 +99,6 @@ def _compute_realtime_metrics(price_now: float) -> dict[str, Any]:
         if latest_200w is not None and latest_200w.ma_value:
             price_to_200w_ma = float(price_now / float(latest_200w.ma_value))
 
-        # 3) 读取最新 Ahr999，并用价格比例做实时近似更新
         latest_ahr = session.execute(select(BtcAhr999).order_by(BtcAhr999.date.desc()).limit(1)).scalar_one_or_none()
         latest_price_row = session.execute(select(BtcPrice).order_by(BtcPrice.date.desc()).limit(1)).scalar_one_or_none()
 
@@ -125,28 +106,23 @@ def _compute_realtime_metrics(price_now: float) -> dict[str, Any]:
         if latest_ahr is not None and latest_price_row is not None and latest_price_row.close:
             ahr_now = float(latest_ahr.ahr999_value) * float(price_now) / float(latest_price_row.close)
 
-        # 4) 最近一个完整交易日入库的多窗口百分位（供前端展示「昨日及以前」的统计语境）
-        latest_rp = session.execute(select(BtcRsiPercentile).order_by(BtcRsiPercentile.date.desc()).limit(1)).scalar_one_or_none()
-        latest_fg = session.execute(select(BtcFearGreed).order_by(BtcFearGreed.date.desc()).limit(1)).scalar_one_or_none()
+        rsi_hist = session.execute(select(BtcRsi.rsi6, BtcRsi.rsi12).order_by(BtcRsi.date.asc())).all()
+        rsi6_hist = pd.Series([r.rsi6 for r in rsi_hist], dtype="float64")
+        rsi12_hist = pd.Series([r.rsi12 for r in rsi_hist], dtype="float64")
 
-    pct_block: dict[str, Any] = {}
-    if latest_rp is not None:
-        pct_block["pct_asof_date"] = latest_rp.date
-        for y in (1, 2, 3, 4):
-            pct_block[f"rsi6_pct_{y}y_eod"] = getattr(latest_rp, f"rsi6_pct_{y}y", None)
-            pct_block[f"rsi12_pct_{y}y_eod"] = getattr(latest_rp, f"rsi12_pct_{y}y", None)
-        pct_block["rsi6_pct_all_eod"] = latest_rp.rsi6_pct_all
-        pct_block["rsi12_pct_all_eod"] = latest_rp.rsi12_pct_all
-    if latest_fg is not None:
-        pct_block.setdefault("pct_asof_date", latest_fg.date)
-        for y in (1, 2, 3, 4):
-            pct_block[f"fg_pct_{y}y_eod"] = getattr(latest_fg, f"fg_pct_{y}y", None)
-        pct_block["fg_pct_all_eod"] = latest_fg.fg_pct_all
-    if latest_ahr is not None:
-        pct_block.setdefault("pct_asof_date", latest_ahr.date)
-        for y in (1, 2, 3, 4):
-            pct_block[f"ahr999_pct_{y}y_eod"] = getattr(latest_ahr, f"ahr999_pct_{y}y", None)
-        pct_block["ahr999_pct_all_eod"] = latest_ahr.ahr999_pct_all
+        fg_hist = session.execute(select(BtcFearGreed.value).order_by(BtcFearGreed.date.asc())).all()
+        fg_series = pd.Series([r.value for r in fg_hist], dtype="float64")
+
+        ahr_hist = session.execute(select(BtcAhr999.ahr999_value).order_by(BtcAhr999.date.asc())).all()
+        ahr_series = pd.Series([r.ahr999_value for r in ahr_hist], dtype="float64")
+
+        latest_price_date = latest_price_row.date if latest_price_row else None
+
+    pct_block: dict[str, Any] = {"pct_asof_date": latest_price_date}
+    pct_block.update(build_eod_percentile_api_dict(rsi6_hist, "rsi6"))
+    pct_block.update(build_eod_percentile_api_dict(rsi12_hist, "rsi12"))
+    pct_block.update(build_eod_percentile_api_dict(fg_series, "fg"))
+    pct_block.update(build_eod_percentile_api_dict(ahr_series, "ahr999"))
 
     return {
         "price": float(price_now),
@@ -161,11 +137,6 @@ def _compute_realtime_metrics(price_now: float) -> dict[str, Any]:
 
 
 def _refresh_cache_once() -> dict[str, Any]:
-    """
-    执行一次缓存刷新：
-    - 成功：更新缓存并返回新数据
-    - 失败：返回旧缓存（如果有），并保留旧 updated_at
-    """
     global _cache_data, _cache_timestamp
 
     try:
@@ -176,22 +147,13 @@ def _refresh_cache_once() -> dict[str, Any]:
             _cache_timestamp = time.time()
         return fresh_data
     except Exception:
-        # 网络失败等情况：返回上次成功缓存
         with _cache_lock:
             if _cache_data is not None:
                 return dict(_cache_data)
-        # 如果连历史缓存都没有，就抛出错误
         raise
 
 
 def get_realtime_data() -> dict[str, Any]:
-    """
-    对外函数1：获取实时数据。
-
-    规则：
-    - 如果缓存还在 5 分钟有效期内，直接返回缓存
-    - 否则主动刷新一次并返回
-    """
     with _cache_lock:
         cache_valid = _cache_data is not None and (time.time() - _cache_timestamp) < CACHE_TTL_SECONDS
         if cache_valid:
@@ -200,25 +162,44 @@ def get_realtime_data() -> dict[str, Any]:
     return _refresh_cache_once()
 
 
+def get_realtime_values(window: str = "2Y") -> dict[str, dict[str, Any]]:
+    """
+    从 realtime_values 表读取最新值，返回：
+    {indicator_code: {"current_value": x, "update_time": "...", "window": "2Y"}}
+    """
+    from app.db.database import init_db
+
+    init_db()
+    with SessionLocal() as session:
+        rows = session.execute(
+            select(RealtimeValue)
+            .where(RealtimeValue.window == window)
+            .order_by(RealtimeValue.update_time.desc())
+        ).scalars().all()
+
+    out: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        # 同一个 indicator_code 可能有历史记录，取最新 update_time 的一条
+        if r.indicator_code in out:
+            continue
+        out[str(r.indicator_code)] = {
+            "current_value": r.current_value,
+            "update_time": r.update_time,
+            "window": r.window,
+        }
+    return out
+
+
 def _background_loop() -> None:
-    """
-    后台线程循环：
-    - 启动后先刷新一次
-    - 之后每 5 分钟刷新一次
-    """
     while True:
         try:
             _refresh_cache_once()
         except Exception:
-            # 后台线程不让异常中断，静默保活
             pass
         time.sleep(REFRESH_INTERVAL_SECONDS)
 
 
 def start_background_refresh() -> None:
-    """
-    对外函数2：启动后台刷新线程（只会启动一次）。
-    """
     global _refresh_thread_started
 
     with _cache_lock:
@@ -231,6 +212,5 @@ def start_background_refresh() -> None:
 
 
 if __name__ == "__main__":
-    # 本地手动测试入口
     start_background_refresh()
     print(get_realtime_data())
