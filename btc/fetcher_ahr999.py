@@ -7,7 +7,7 @@ BTC Ahr999 历史数据抓取与计算脚本（Prompt 6）。
 
 - **已设置 CG_API_KEY**：1) CoinGlass 官方 API → 2) 失败则公开第三方 → 3) 再失败则本地计算。
 
-最终把结果写入 btc_ahr999 表，写入方式为 upsert（按 date 去重更新）。
+最终把结果写入 btc_ahr999 表（仅 ahr999_value 原始值）；多窗口百分位由前端内存计算。
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ from sqlalchemy import func, select
 
 from app.db.database import SessionLocal, init_db, upsert_by_date
 from app.db.models import BtcAhr999
-from btc.percentile_common import ROLLING_PERCENTILE_YEAR_DAYS, rolling_percentile_series
 
 # 目标时间范围：按你的要求，从 2015 年开始
 START_DATE = "2015-01-01"
@@ -86,22 +85,6 @@ def _url_get_json_with_retry(
             time.sleep(5)
 
     return None
-
-
-def _compute_percentiles(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    计算 Ahr999 的 1Y / 2Y / 3Y / 4Y / 全历史 滚动百分位。
-
-    百分位结果保留两位小数（与历史行为一致，便于前端展示）。
-    """
-    out = df.copy()
-    values = out["ahr999_value"]
-
-    for y, days in ROLLING_PERCENTILE_YEAR_DAYS.items():
-        out[f"ahr999_pct_{y}y"] = rolling_percentile_series(values, days).round(2)
-
-    out["ahr999_pct_all"] = rolling_percentile_series(values, None).round(2)
-    return out
 
 
 def _try_fetch_from_coinglass() -> pd.DataFrame | None:
@@ -254,30 +237,25 @@ def _compute_from_price() -> pd.DataFrame:
 
 def build_ahr999_history() -> tuple[pd.DataFrame, str]:
     """
-    构建 Ahr999 历史数据。
-    返回：
-    - DataFrame（含 date、ahr999_value、1Y~4Y 与 ALL 滚动百分位）
-    - 数据来源说明字符串
+    构建 Ahr999 历史数据（仅 date + ahr999_value；百分位由前端内存计算）。
     """
     api_key = os.getenv("CG_API_KEY", "").strip()
 
     if api_key:
-        # 有 Key：先官方，再公开第三方，最后才本地（与旧版行为一致）
         df = _try_fetch_from_coinglass()
         if df is not None:
-            return _compute_percentiles(df), "CoinGlass 官方 API"
+            return df, "CoinGlass 官方 API"
 
         df = _try_fetch_from_public_source()
         if df is not None:
-            return _compute_percentiles(df), "公开第三方 Ahr999 接口"
+            return df, "公开第三方 Ahr999 接口"
     else:
-        # 无 Key：不再打公开接口（避免多次超时重试），直接进入本地计算
         print(
             "[Ahr999] 未设置 CG_API_KEY：跳过 CoinGlass 与公开第三方，直接使用本地公式（yfinance 价格 + 幂律回归 + 365 日几何均值）。"
         )
 
     df = _compute_from_price()
-    return _compute_percentiles(df), "本地自计算（幂律回归 + 365天几何均值）"
+    return df, "本地自计算（幂律回归 + 365天几何均值）"
 
 
 def _save_to_db(df: pd.DataFrame) -> int:
@@ -296,11 +274,6 @@ def _save_to_db(df: pd.DataFrame) -> int:
                 row_data={
                     "date": row["date"],
                     "ahr999_value": float(row["ahr999_value"]),
-                    "ahr999_pct_1y": float(row["ahr999_pct_1y"]) if pd.notna(row["ahr999_pct_1y"]) else None,
-                    "ahr999_pct_2y": float(row["ahr999_pct_2y"]) if pd.notna(row["ahr999_pct_2y"]) else None,
-                    "ahr999_pct_3y": float(row["ahr999_pct_3y"]) if pd.notna(row["ahr999_pct_3y"]) else None,
-                    "ahr999_pct_4y": float(row["ahr999_pct_4y"]) if pd.notna(row["ahr999_pct_4y"]) else None,
-                    "ahr999_pct_all": float(row["ahr999_pct_all"]) if pd.notna(row["ahr999_pct_all"]) else None,
                 },
             )
             written += 1
@@ -322,11 +295,7 @@ def fetch_full_history() -> tuple[int, str]:
 
 def fetch_incremental() -> tuple[int, str]:
     """
-    增量更新（与恐惧贪婪一致：全表重算后整表 upsert）：
-
-    - 读取数据库最新日期（仅用于日志）
-    - 重建完整序列（保证多窗口百分位一致）
-    - 对所有日期 upsert（新百分位列上线后也能回填历史行）
+    增量更新：重建完整序列并对所有日期 upsert 原始 ahr999_value。
     """
     init_db()
     with SessionLocal() as session:
@@ -345,16 +314,12 @@ def fetch_incremental() -> tuple[int, str]:
     elif api_max and api_max > latest_date:
         print(f"[完成] Ahr999 已 upsert {written} 条；序列最新 {api_max}（数据库原最新：{latest_date}）。来源：{source_used}")
     else:
-        print(f"[完成] Ahr999 日期未推进，已对 {written} 条全量刷新百分位。来源：{source_used}")
+        print(f"[完成] Ahr999 日期未推进，已对 {written} 条全量刷新原始值。来源：{source_used}")
     return written, source_used
 
 
 def summarize_table() -> dict[str, Any]:
-    """
-    返回：
-    - 总条数、最早/最新日期
-    - 最新一天与前一天的 ahr999 和百分位
-    """
+    """返回总条数、最早/最新日期，以及最新一天与前一天的 ahr999_value。"""
     with SessionLocal() as session:
         total = session.scalar(select(func.count()).select_from(BtcAhr999)) or 0
         min_date, max_date = session.execute(select(func.min(BtcAhr999.date), func.max(BtcAhr999.date))).one()
@@ -389,7 +354,7 @@ if __name__ == "__main__":
     prev = summary["previous"]
     if latest is not None:
         print("\n- 最新一天:")
-        print(f"  date={latest.date}, ahr999_value={latest.ahr999_value}, pct_1y={latest.ahr999_pct_1y}, pct_4y={latest.ahr999_pct_4y}, pct_all={latest.ahr999_pct_all}")
+        print(f"  date={latest.date}, ahr999_value={latest.ahr999_value}")
     if prev is not None:
         print("- 前一天:")
-        print(f"  date={prev.date}, ahr999_value={prev.ahr999_value}, pct_1y={prev.ahr999_pct_1y}, pct_4y={prev.ahr999_pct_4y}, pct_all={prev.ahr999_pct_all}")
+        print(f"  date={prev.date}, ahr999_value={prev.ahr999_value}")
