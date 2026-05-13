@@ -8,6 +8,9 @@
 命令行：
 - `python -m scheduler.daily_sync`：正常全流程
 - `python -m scheduler.daily_sync --test`：快速自检（少跑几步 + 打印最近样本）
+
+说明：
+- 库中只保留 RSI / 恐惧贪婪 / Ahr999 等原始值；百分位由 Streamlit 内存计算。
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from typing import Any, Callable
 from sqlalchemy import select
 
 from app.db.database import SessionLocal, init_db
-from app.db.models import BtcFearGreed, BtcRsiPercentile
+from app.db.models import BtcFearGreed, BtcRsi
 from btc.fetcher_ahr999 import fetch_full_history as fetch_ahr999_full
 from btc.fetcher_ahr999 import fetch_incremental as fetch_ahr999_incremental
 from btc.fetcher_fear_greed import fetch_incremental as fetch_fng_incremental
@@ -29,28 +32,14 @@ from btc.indicators_rsi import run_rsi_pipeline
 
 
 def _now_str() -> str:
-    """
-    返回当前时间字符串，格式：YYYY-MM-DD HH:MM:SS
-    """
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _log(message: str) -> None:
-    """
-    统一日志打印格式。
-    """
     print(f"[{_now_str()}] {message}")
 
 
 def _run_step(step_name: str, success_text: str, func: Callable[[], Any]) -> dict[str, Any]:
-    """
-    执行一个步骤，并记录耗时与状态。
-
-    参数：
-    - step_name: 步骤内部名称（用于统计）
-    - success_text: 成功时要打印的中文文案
-    - func: 具体执行函数
-    """
     start = perf_counter()
     try:
         result = func()
@@ -64,59 +53,49 @@ def _run_step(step_name: str, success_text: str, func: Callable[[], Any]) -> dic
 
 
 def _print_test_sample_summary() -> None:
-    """
-    TEST 模式尾部：打印最近若干行的多窗口百分位，便于肉眼核对是否入库。
-    """
+    """TEST 模式尾部：打印最近若干行的原始 RSI / 恐惧贪婪，便于肉眼核对。"""
     with SessionLocal() as session:
-        rsi_rows = session.execute(select(BtcRsiPercentile).order_by(BtcRsiPercentile.date.desc()).limit(10)).scalars().all()
+        rsi_rows = session.execute(select(BtcRsi).order_by(BtcRsi.date.desc()).limit(10)).scalars().all()
         fg_rows = session.execute(select(BtcFearGreed).order_by(BtcFearGreed.date.desc()).limit(5)).scalars().all()
 
-    _log("--- 🧪 TEST 样本：最近 10 日 btc_rsi_percentile（RSI6 多窗口）---")
+    _log("--- 🧪 TEST 样本：最近 10 日 btc_rsi（原始 RSI6/12）---")
     for r in reversed(rsi_rows):
-        _log(
-            f"{r.date} | rsi6_pct 1y={r.rsi6_pct_1y} 2y={r.rsi6_pct_2y} 3y={r.rsi6_pct_3y} 4y={r.rsi6_pct_4y} "
-            f"| rsi12_pct 1y={r.rsi12_pct_1y} 2y={r.rsi12_pct_2y} 3y={r.rsi12_pct_3y} 4y={r.rsi12_pct_4y}"
-        )
+        _log(f"{r.date} | rsi6={r.rsi6} | rsi12={r.rsi12}")
 
-    _log("--- 🧪 TEST 样本：最近 5 日 btc_fear_greed（多窗口）---")
+    _log("--- 🧪 TEST 样本：最近 5 日 btc_fear_greed（原始 value）---")
     for r in reversed(fg_rows):
-        _log(
-            f"{r.date} | value={r.value} | fg_pct 1y={r.fg_pct_1y} 2y={r.fg_pct_2y} 3y={r.fg_pct_3y} 4y={r.fg_pct_4y}"
-        )
+        _log(f"{r.date} | value={r.value} | classification={r.classification}")
 
 
 def run_daily_sync(test: bool = False) -> list[dict[str, Any]]:
     """
     按顺序执行每日同步流程：
     1) BTC 价格：先补「中间断层」，再追「尾部新数据」
-    2) RSI 重算（全表基于 btc_price；含 1Y~4Y+ALL 滚动百分位，补价格断层后会随本轮全部重算）
-    3) 恐惧贪婪（全历史重算百分位后整表 upsert，含 1Y~4Y+ALL；与价格补洞无强依赖但每轮刷新）
-    4) Ahr999：若第 1 步补过中间价格断层，则本步改为「全量重写入」；否则仍走「全表 upsert」
-       （价格补洞后指标须重对齐；多窗口百分位随 df 一并写入）
-    5) 4年均线/200周均线重算（同样全表重算）
+    2) RSI 重算（仅写入 btc_rsi 原始值）
+    3) 恐惧贪婪（仅写入原始 value / classification）
+    4) Ahr999：若第 1 步补过中间价格断层，则本步改为「全量重写入」；否则走增量
+    5) 4年均线/200周均线重算（仅 ma 与价比）
 
     参数：
-    - test: True 时跳过 Ahr999 与均线，加快本地验证；末尾打印 RSI/F&G 多窗口样本
+    - test: True 时跳过 Ahr999 与均线，加快本地验证
     """
-    # 幂等补列 + 建表（含 schema_migrations）
     init_db()
 
     if test:
-        _log("🧪 TEST 模式开启：将跳过 Ahr999 / 均线，仅验证价格→RSI→恐惧贪婪 与多窗口百分位入库")
+        _log("🧪 TEST 模式开启：将跳过 Ahr999 / 均线，仅验证价格→RSI→恐惧贪婪")
 
     results: list[dict[str, Any]] = []
 
     results.append(_run_step("price", "BTC价格同步完成", fetch_price_incremental))
 
-    # 从价格步骤结果里读取「是否刚修补了中间断层」，决定 Ahr999 用增量还是全量
     price_result = results[-1].get("result")
     force_ahr999_full = bool(
         isinstance(price_result, dict) and price_result.get("had_internal_gaps_filled") is True
     )
     if force_ahr999_full and not test:
         _log(
-            "ℹ️ 本次已修补 btc_price 中间断层：随后 RSI（多窗口百分位）、恐惧贪婪（全表多窗口）、"
-            "Ahr999（全量重写入）与均线将依次重算，避免补价后仍留空列或错位。"
+            "ℹ️ 本次已修补 btc_price 中间断层：随后 RSI、恐惧贪婪、"
+            "Ahr999（全量重写入）与均线将依次重算。"
         )
 
     results.append(_run_step("rsi", "RSI指标计算完成", run_rsi_pipeline))
@@ -151,7 +130,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--test",
         action="store_true",
-        help="快速自检：跳过 Ahr999/均线，并打印最近 RSI/F&G 多窗口百分位样本",
+        help="快速自检：跳过 Ahr999/均线，并打印最近 RSI、恐惧贪婪原始值样本",
     )
     args = parser.parse_args()
     run_daily_sync(test=args.test)
