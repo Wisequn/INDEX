@@ -7,6 +7,7 @@ streamlit run app/ui/main.py
 
 from __future__ import annotations
 
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -25,6 +26,7 @@ from app.db.database import init_db
 from app.ui.chart_history import load_full_chart_dataframe
 from btc.realtime import get_realtime_values
 from btc.percentile_runtime import calculate_dynamic_percentile
+from scheduler.alert_engine import build_inputs_realtime, calculate_total_score, get_factor_scores
 
 # 建表 + 幂等清理旧百分位列（@st.cache_data 内部也会 init_db，此处保证首屏前迁移已执行）
 init_db()
@@ -895,9 +897,45 @@ with _rv_cols[0]:
     _window = st.selectbox("实时窗口", options=["2Y"], index=0, key="rt_window", label_visibility="collapsed")
 with _rv_cols[1]:
     if st.button("刷新当前值", use_container_width=True):
+        _load_realtime_factor_scores.clear()
         st.rerun()
 
 realtime_map = get_realtime_values(window=_window)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _load_realtime_factor_scores() -> tuple[dict[str, int], int]:
+    """基于 2Y 实时输入计算各因子得分与总分（与 alert_engine 一致）。"""
+    inp = build_inputs_realtime()
+    scores = get_factor_scores(inputs=inp)
+    total = calculate_total_score(inputs=inp)
+    return scores, total
+
+
+def _fmt_factor_cell(scores: dict[str, int], *codes: str) -> str:
+    """取指定因子中非 0 的得分，用于表格单元格展示。"""
+    parts = [str(scores[c]) for c in codes if scores.get(c, 0) != 0]
+    return ", ".join(parts) if parts else "0"
+
+
+def _style_score_column(series: pd.Series) -> list[str]:
+    styles: list[str] = []
+    for i, val in enumerate(series):
+        text = str(val).strip()
+        is_total_row = i == len(series) - 1
+        weight = "font-weight: 700; " if is_total_row else ""
+        if text in {"", "-", "—"}:
+            styles.append(f"{weight}color: #95a5a6")
+            continue
+        m = re.search(r"-?\d+", text)
+        n = int(m.group()) if m else 0
+        if n < 0:
+            styles.append(f"{weight}color: #e74c3c")
+        elif n > 0:
+            styles.append(f"{weight}color: #27ae60")
+        else:
+            styles.append(f"{weight}color: #95a5a6")
+    return styles
 
 
 def _fmt_current(indicator_code: str) -> str:
@@ -917,22 +955,119 @@ def _fmt_current(indicator_code: str) -> str:
     return f"{fv:.4f}"
 
 
+if _window == "2Y":
+    _factor_scores, _total_score = _load_realtime_factor_scores()
+else:
+    _factor_scores = {k: 0 for k in ("1A", "2A", "2B", "3A", "3B", "4A", "4B", "5A", "5B", "5C", "6A", "6B")}
+    _total_score = 0
+
+_score_empty = "—" if _window != "2Y" else "0"
+_fg_score = _fmt_factor_cell(_factor_scores, "4A", "4B") if _window == "2Y" else _score_empty
+
 info_rows = [
-    {"指标代码": "close", "中文名称": "BTC价格", "当前值": _fmt_current("close"), "指标解释": "比特币当日收盘价（USD）"},
-    {"指标代码": "rsi6", "中文名称": "RSI6", "当前值": _fmt_current("rsi6"), "指标解释": "6日相对强弱指标，反映短周期动量"},
-    {"指标代码": "rsi12", "中文名称": "RSI12", "当前值": _fmt_current("rsi12"), "指标解释": "12日相对强弱指标，反映中短周期动量"},
-    {"指标代码": "rsi6_pct_ui", "中文名称": "RSI6%（2Y）", "当前值": _fmt_current("rsi6_pct_ui"), "指标解释": "最近2年窗口（730天）按当前 RSI6 动态计算的百分位（0～100）"},
-    {"指标代码": "rsi12_pct_ui", "中文名称": "RSI12%（2Y）", "当前值": _fmt_current("rsi12_pct_ui"), "指标解释": "最近2年窗口（730天）按当前 RSI12 动态计算的百分位（0～100）"},
-    {"指标代码": "value", "中文名称": "恐惧贪婪", "当前值": _fmt_current("value"), "指标解释": "恐惧贪婪指数原值（0-100）"},
-    {"指标代码": "fg_pct_ui", "中文名称": "恐惧贪婪%（2Y）", "当前值": _fmt_current("fg_pct_ui"), "指标解释": "最近2年窗口（730天）按当前恐惧贪婪值动态计算的百分位（0～100）"},
-    {"指标代码": "ahr999_value", "中文名称": "Ahr999", "当前值": _fmt_current("ahr999_value"), "指标解释": "Ahr999估值指标（低于0.45偏低估，高于1.2偏高估）"},
-    {"指标代码": "ahr999_pct_ui", "中文名称": "Ahr999%（2Y）", "当前值": _fmt_current("ahr999_pct_ui"), "指标解释": "最近2年窗口（730天）按当前 Ahr999 动态计算的百分位（0～100）"},
-    {"指标代码": "ma_value(4y)", "中文名称": "4年均线", "当前值": _fmt_current("ma_value(4y)"), "指标解释": "1458日简单移动平均线"},
-    {"指标代码": "price_to_4y_ma", "中文名称": "价格/4年均线", "当前值": _fmt_current("price_to_4y_ma"), "指标解释": "当前价格相对4年均线的倍数"},
-    {"指标代码": "ma_value(200w)", "中文名称": "200周均线", "当前值": _fmt_current("ma_value(200w)"), "指标解释": "1400日简单移动平均线"},
-    {"指标代码": "price_to_200w_ma", "中文名称": "价格/200周均线", "当前值": _fmt_current("price_to_200w_ma"), "指标解释": "当前价格相对200周均线的倍数"},
+    {
+        "指标代码": "close",
+        "中文名称": "BTC价格",
+        "当前值": _fmt_current("close"),
+        "评分": _fmt_factor_cell(_factor_scores, "1A") if _window == "2Y" else _score_empty,
+        "指标解释": "比特币当日收盘价（USD）",
+    },
+    {
+        "指标代码": "rsi6",
+        "中文名称": "RSI6",
+        "当前值": _fmt_current("rsi6"),
+        "评分": _score_empty,
+        "指标解释": "6日相对强弱指标，反映短周期动量",
+    },
+    {
+        "指标代码": "rsi12",
+        "中文名称": "RSI12",
+        "当前值": _fmt_current("rsi12"),
+        "评分": _score_empty,
+        "指标解释": "12日相对强弱指标，反映中短周期动量",
+    },
+    {
+        "指标代码": "rsi6_pct_ui",
+        "中文名称": "RSI6%（2Y）",
+        "当前值": _fmt_current("rsi6_pct_ui"),
+        "评分": _fmt_factor_cell(_factor_scores, "2A", "2B") if _window == "2Y" else _score_empty,
+        "指标解释": "最近2年窗口（730天）按当前 RSI6 动态计算的百分位（0～100）",
+    },
+    {
+        "指标代码": "rsi12_pct_ui",
+        "中文名称": "RSI12%（2Y）",
+        "当前值": _fmt_current("rsi12_pct_ui"),
+        "评分": _fmt_factor_cell(_factor_scores, "3A", "3B") if _window == "2Y" else _score_empty,
+        "指标解释": "最近2年窗口（730天）按当前 RSI12 动态计算的百分位（0～100）",
+    },
+    {
+        "指标代码": "value",
+        "中文名称": "恐惧贪婪",
+        "当前值": _fmt_current("value"),
+        "评分": _fg_score,
+        "指标解释": "恐惧贪婪指数原值（0-100）",
+    },
+    {
+        "指标代码": "fg_pct_ui",
+        "中文名称": "恐惧贪婪%（2Y）",
+        "当前值": _fmt_current("fg_pct_ui"),
+        "评分": _fg_score,
+        "指标解释": "最近2年窗口（730天）按当前恐惧贪婪值动态计算的百分位（0～100）",
+    },
+    {
+        "指标代码": "ahr999_value",
+        "中文名称": "Ahr999",
+        "当前值": _fmt_current("ahr999_value"),
+        "评分": _score_empty,
+        "指标解释": "Ahr999估值指标（低于0.45偏低估，高于1.2偏高估）",
+    },
+    {
+        "指标代码": "ahr999_pct_ui",
+        "中文名称": "Ahr999%（2Y）",
+        "当前值": _fmt_current("ahr999_pct_ui"),
+        "评分": _fmt_factor_cell(_factor_scores, "5A", "5B", "5C") if _window == "2Y" else _score_empty,
+        "指标解释": "最近2年窗口（730天）按当前 Ahr999 动态计算的百分位（0～100）",
+    },
+    {
+        "指标代码": "ma_value(4y)",
+        "中文名称": "4年均线",
+        "当前值": _fmt_current("ma_value(4y)"),
+        "评分": _score_empty,
+        "指标解释": "1458日简单移动平均线",
+    },
+    {
+        "指标代码": "price_to_4y_ma",
+        "中文名称": "价格/4年均线",
+        "当前值": _fmt_current("price_to_4y_ma"),
+        "评分": _fmt_factor_cell(_factor_scores, "6A", "6B") if _window == "2Y" else _score_empty,
+        "指标解释": "当前价格相对4年均线的倍数",
+    },
+    {
+        "指标代码": "ma_value(200w)",
+        "中文名称": "200周均线",
+        "当前值": _fmt_current("ma_value(200w)"),
+        "评分": _score_empty,
+        "指标解释": "1400日简单移动平均线",
+    },
+    {
+        "指标代码": "price_to_200w_ma",
+        "中文名称": "价格/200周均线",
+        "当前值": _fmt_current("price_to_200w_ma"),
+        "评分": _score_empty,
+        "指标解释": "当前价格相对200周均线的倍数",
+    },
+    {
+        "指标代码": "—",
+        "中文名称": "总分",
+        "当前值": "—",
+        "评分": str(_total_score) if _window == "2Y" else _score_empty,
+        "指标解释": "13 因子扣分累加（2Y 实时，越低越接近抄底信号）",
+    },
 ]
-st.dataframe(pd.DataFrame(info_rows), use_container_width=True, hide_index=True)
+
+_info_df = pd.DataFrame(info_rows)
+_styled_info = _info_df.style.apply(_style_score_column, subset=["评分"])
+st.dataframe(_styled_info, use_container_width=True, hide_index=True)
 
 st.subheader("最新数据预览")
 st.dataframe(df_all.tail(20), use_container_width=True)

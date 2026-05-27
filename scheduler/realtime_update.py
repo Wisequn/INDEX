@@ -1,8 +1,11 @@
 """
-每 10 分钟实时更新指标当前值到 realtime_values 表。
+每 5 分钟实时更新指标当前值到 realtime_values 表，并检测实时告警。
 
 执行：
-- python -m scheduler.realtime_update
+    python -m scheduler.realtime_update
+
+Crontab（deploy.sh）：
+    */5 * * * * cd /opt/INDEX && /opt/INDEX/.venv/bin/python -m scheduler.realtime_update >> /opt/INDEX/logs/realtime_update.log 2>&1
 """
 
 from __future__ import annotations
@@ -15,8 +18,9 @@ from sqlalchemy import select
 from app.db.database import SessionLocal, init_db, upsert_by_unique_keys
 from app.db.models import Btc200wMa, Btc4yMa, BtcAhr999, BtcFearGreed, BtcPrice, BtcRsi, RealtimeValue
 from btc.indicators_rsi import compute_wilder_rsi
-from btc.realtime import _fetch_realtime_price
 from btc.percentile_runtime import calculate_dynamic_percentile
+from btc.realtime import _fetch_realtime_price
+from scheduler.alert_engine import check_realtime_alerts
 
 DEFAULT_WINDOW = "2Y"
 WINDOW_DAYS = 730
@@ -120,4 +124,12 @@ def run_realtime_update(window: str = DEFAULT_WINDOW) -> dict[str, float | None]
 
 if __name__ == "__main__":
     payload = run_realtime_update()
-    print(f"[realtime_update] updated {len(payload)} indicators @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[realtime_update] updated {len(payload)} indicators @ {ts}")
+
+    alert_result = check_realtime_alerts()
+    print(
+        f"[realtime_update] alerts score={alert_result.total_score} "
+        f"triggered={alert_result.triggered_rules} sent={alert_result.sent_rules} "
+        f"skipped={alert_result.skipped_rules}"
+    )

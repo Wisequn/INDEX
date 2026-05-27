@@ -116,6 +116,34 @@ class MarketData(Base):
     )
 
 
+class BtcAlertDedup(Base):
+    """实时告警去重：同一规则在同一自然日只推送一次。"""
+
+    __tablename__ = "btc_alert_dedup"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rule_code = Column(String(8), nullable=False, index=True, comment="因子代码，如 2B")
+    bucket_date = Column(String(10), nullable=False, index=True, comment="去重日期 YYYY-MM-DD")
+    sent_at = Column(String(19), nullable=False, comment="发送时间")
+    total_score = Column(Integer, nullable=True, comment="推送时实时抄底分数")
+    triggered_rules = Column(String(128), nullable=True, comment="推送时全部触发的因子，逗号分隔")
+
+    __table_args__ = (
+        UniqueConstraint("rule_code", "bucket_date", name="uq_alert_rule_bucket_date"),
+    )
+
+
+class BtcBottomScore(Base):
+    """BTC 抄底分数（每日一条，分数为负向累加，越低越接近抄底信号）。"""
+
+    __tablename__ = "btc_bottom_score"
+
+    id = Column(Integer, primary_key=True, index=True)
+    date = Column(String(10), nullable=False, unique=True, index=True, comment="日期，格式 YYYY-MM-DD")
+    score = Column(Integer, nullable=False, comment="当日抄底分数总分（各因子扣分累加）")
+    created_at = Column(String(19), nullable=False, comment="记录写入时间 YYYY-MM-DD HH:MM:SS")
+
+
 class RealtimeValue(Base):
     """指标实时值缓存表（默认窗口 2Y）。"""
 

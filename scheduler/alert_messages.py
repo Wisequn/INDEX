@@ -1,0 +1,205 @@
+"""
+抄底因子实时告警文案（模板与触发判定，与 calculate_total_score 规则一致）。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from scheduler.alert_engine import BottomScoreInputs
+
+# 严格使用用户提供的模板（占位符名与 build_format_context 一致）
+ALERT_TEMPLATES: dict[str, str] = {
+    "1A": "🚨 BTC跌至近2年低点！当前价格：{close}（当前BTC价格：{close}）",
+    "2A": "⚠️ 短期下跌较快，可能是短期低点。RSI6={rsi6}，RSI6%={rsi6_pct_ui}（当前BTC价格：{close}）",
+    "2B": "🔥 短期超跌严重，建议抄底！RSI6={rsi6}，RSI6%={rsi6_pct_ui}（当前BTC价格：{close}）",
+    "3A": "⚠️ 中短期下跌较快，可能是短期低点。RSI12={rsi12}，RSI12%={rsi12_pct_ui}（当前BTC价格：{close}）",
+    "3B": "🔥 短期超跌严重，具备抄底条件！RSI12={rsi12}，RSI12%={rsi12_pct_ui}（当前BTC价格：{close}）",
+    "4A": "😰 近期出现恐慌情绪，请继续观测是否具备抄底条件。FearGreed={value}（当前BTC价格：{close}）",
+    "4B": "😱 极度恐慌！近两天可能出现抄底低点。FearGreed={value}（当前BTC价格：{close}）",
+    "5A": "📉 BTC具备定投条件了，可以开始少量定投。Ahr999={ahr999_value}（当前BTC价格：{close}）",
+    "5B": "📉 进入熊市周期，可以抄底或持续定投。Ahr999={ahr999_value}（当前BTC价格：{close}）",
+    "5C": "🔥 相信跌了很多了，可以满仓了吧？Ahr999={ahr999_value}（当前BTC价格：{close}）",
+    "6A": "⚾ BTC进入击球区了！价格/4年均线={price_to_4y_ma}（当前BTC价格：{close}）",
+    "6B": "🔥 可以满仓了吧？价格/4年均线={price_to_4y_ma}（当前BTC价格：{close}）",
+}
+
+DAILY_BRIEFING_TEMPLATE = """Index 每日早报 ({report_date} 09:00)
+BTC价格: {close}
+RSI6: {rsi6} (RSI6%: {rsi6_pct_ui})
+RSI12: {rsi12} (RSI12%: {rsi12_pct_ui})
+FearGreed: {value} (FearGreed%: {fg_pct_ui})
+Ahr999: {ahr999_value} (Ahr999%: {ahr999_pct_ui})
+价格/4年均线: {price_to_4y_ma}
+价格/200周均线: {price_to_200w_ma}
+当前BTC下跌因子总分: {total_score} / 100"""
+
+
+@dataclass(frozen=True)
+class BriefingSnapshot(BottomScoreInputs):
+    """早报额外字段。"""
+
+    price_to_200w_ma: float | None = None
+    report_date: str = ""
+    total_score: int = 0
+
+
+def _hit_1a(inp: BottomScoreInputs) -> bool:
+    return (
+        inp.close is not None
+        and inp.close_2y_low is not None
+        and inp.close == inp.close_2y_low
+    )
+
+
+def _hit_2b(inp: BottomScoreInputs) -> bool:
+    return (
+        inp.rsi6 is not None
+        and inp.rsi6_pct_ui is not None
+        and inp.rsi6 < 12
+        and inp.rsi6_pct_ui < 1
+    )
+
+
+def _hit_2a(inp: BottomScoreInputs) -> bool:
+    return (
+        inp.rsi6 is not None
+        and inp.rsi6_pct_ui is not None
+        and inp.rsi6 < 12
+        and inp.rsi6_pct_ui < 5
+    )
+
+
+def _hit_3b(inp: BottomScoreInputs) -> bool:
+    return (
+        inp.rsi12 is not None
+        and inp.rsi12_pct_ui is not None
+        and inp.rsi12 < 15
+        and inp.rsi12_pct_ui < 1
+    )
+
+
+def _hit_3a(inp: BottomScoreInputs) -> bool:
+    return (
+        inp.rsi12 is not None
+        and inp.rsi12_pct_ui is not None
+        and inp.rsi12 < 25
+        and inp.rsi12_pct_ui < 5
+    )
+
+
+def _hit_4b(inp: BottomScoreInputs) -> bool:
+    return (
+        inp.value is not None
+        and inp.fg_pct_ui is not None
+        and inp.value <= 8
+        and inp.fg_pct_ui < 0.5
+    )
+
+
+def _hit_4a(inp: BottomScoreInputs) -> bool:
+    return (
+        inp.value is not None
+        and inp.fg_pct_ui is not None
+        and inp.value < 12
+        and inp.fg_pct_ui < 2
+    )
+
+
+def _hit_5b(inp: BottomScoreInputs) -> bool:
+    return (
+        inp.ahr999_value is not None
+        and inp.ahr999_pct_ui is not None
+        and inp.ahr999_value < 0.45
+        and inp.ahr999_pct_ui < 3
+    )
+
+
+def _hit_5a(inp: BottomScoreInputs) -> bool:
+    return (
+        inp.ahr999_value is not None
+        and inp.ahr999_pct_ui is not None
+        and inp.ahr999_value < 0.85
+        and inp.ahr999_pct_ui < 3
+    )
+
+
+def _hit_5c(inp: BottomScoreInputs) -> bool:
+    return inp.ahr999_value is not None and inp.ahr999_value < 0.35
+
+
+def _hit_6b(inp: BottomScoreInputs) -> bool:
+    return inp.price_to_4y_ma is not None and inp.price_to_4y_ma < 0.8
+
+
+def _hit_6a(inp: BottomScoreInputs) -> bool:
+    return inp.price_to_4y_ma is not None and inp.price_to_4y_ma < 1.1
+
+
+def evaluate_triggered_alert_rules(inp: BottomScoreInputs) -> list[str]:
+    """
+    返回应推送的规则代码列表（A/B 对只取 B 或 A；5C 可与 5A/5B 同时出现）。
+    """
+    rules: list[str] = []
+    if _hit_1a(inp):
+        rules.append("1A")
+    if _hit_2b(inp):
+        rules.append("2B")
+    elif _hit_2a(inp):
+        rules.append("2A")
+    if _hit_3b(inp):
+        rules.append("3B")
+    elif _hit_3a(inp):
+        rules.append("3A")
+    if _hit_4b(inp):
+        rules.append("4B")
+    elif _hit_4a(inp):
+        rules.append("4A")
+    if _hit_5b(inp):
+        rules.append("5B")
+    elif _hit_5a(inp):
+        rules.append("5A")
+    if _hit_5c(inp):
+        rules.append("5C")
+    if _hit_6b(inp):
+        rules.append("6B")
+    elif _hit_6a(inp):
+        rules.append("6A")
+    return rules
+
+
+def build_format_context(inp: BottomScoreInputs) -> dict[str, str]:
+    """将数值格式化为模板字符串。"""
+
+    def _f(v: float | None, nd: int = 4) -> str:
+        if v is None:
+            return "N/A"
+        if nd == 0:
+            return f"{v:,.0f}"
+        return f"{v:.{nd}f}"
+
+    return {
+        "close": _f(inp.close, 2),
+        "rsi6": _f(inp.rsi6, 2),
+        "rsi6_pct_ui": _f(inp.rsi6_pct_ui, 2),
+        "rsi12": _f(inp.rsi12, 2),
+        "rsi12_pct_ui": _f(inp.rsi12_pct_ui, 2),
+        "value": _f(inp.value, 0),
+        "fg_pct_ui": _f(inp.fg_pct_ui, 2),
+        "ahr999_value": _f(inp.ahr999_value, 4),
+        "ahr999_pct_ui": _f(inp.ahr999_pct_ui, 2),
+        "price_to_4y_ma": _f(inp.price_to_4y_ma, 4),
+        "price_to_200w_ma": _f(getattr(inp, "price_to_200w_ma", None), 4),
+        "total_score": str(min(100, abs(int(getattr(inp, "total_score", 0))))),
+        "report_date": str(getattr(inp, "report_date", "")),
+    }
+
+
+def format_alert_message(rule_code: str, inp: BottomScoreInputs) -> str:
+    template = ALERT_TEMPLATES[rule_code]
+    return template.format(**build_format_context(inp))
+
+
+def format_daily_briefing(brief: BriefingSnapshot) -> str:
+    return DAILY_BRIEFING_TEMPLATE.format(**build_format_context(brief))

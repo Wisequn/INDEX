@@ -84,20 +84,22 @@ setup_crontab() {
   cron_tmp="$(mktemp)"
 
   # 保留现有 crontab，先移除本项目旧规则，再写入新规则
-  crontab -l 2>/dev/null | rg -v "scheduler.daily_sync|scheduler.realtime_update|index-monitor daily sync|index-monitor realtime update|watchdog_streamlit.sh|index-monitor streamlit watchdog" > "$cron_tmp" || true
+  crontab -l 2>/dev/null | rg -v "scheduler.daily_sync|scheduler.realtime_update|scheduler.daily_morning_report|scheduler.alert_engine --daily-briefing|index-monitor daily sync|index-monitor realtime update|index-monitor daily briefing|index-monitor daily morning report|watchdog_streamlit.sh|index-monitor streamlit watchdog" > "$cron_tmp" || true
 
   # 每天 08:15（UTC+8）执行增量同步
   echo "15 8 * * * cd \"$PROJECT_DIR\" && \"$VENV_DIR/bin/python\" -m scheduler.daily_sync >> \"$DAILY_LOG\" 2>&1 # index-monitor daily sync" >> "$cron_tmp"
 
   # 每 5 分钟：本机检查 Streamlit 进程 + 127.0.0.1:端口 HTTP，不健康则按生产参数重启
   echo "*/5 * * * * \"$PROJECT_DIR/scripts/watchdog_streamlit.sh\" # index-monitor streamlit watchdog" >> "$cron_tmp"
-  # 每 10 分钟：刷新指标说明表实时值
-  echo "*/10 * * * * cd \"$PROJECT_DIR\" && \"$VENV_DIR/bin/python\" -m scheduler.realtime_update >> \"$REALTIME_LOG\" 2>&1 # index-monitor realtime update" >> "$cron_tmp"
+  chmod +x "$PROJECT_DIR/scripts/run_with_env.sh"
+  # 每 5 分钟：刷新实时值 + 实时告警（scripts/run_with_env.sh 自动加载 .env）
+  echo "*/5 * * * * \"$PROJECT_DIR/scripts/run_with_env.sh\" \"$VENV_DIR/bin/python\" -m scheduler.realtime_update >> \"$REALTIME_LOG\" 2>&1 # index-monitor realtime update" >> "$cron_tmp"
+  echo "0 9 * * * \"$PROJECT_DIR/scripts/run_with_env.sh\" \"$VENV_DIR/bin/python\" -m scheduler.daily_morning_report >> \"$LOG_DIR/daily_morning_report.log\" 2>&1 # index-monitor daily morning report" >> "$cron_tmp"
 
   crontab "$cron_tmp"
   rm -f "$cron_tmp"
 
-  ok "crontab 已配置：每日 08:15 同步 + 每10分钟实时值 + 每 5 分钟 Streamlit 健康守护"
+  ok "crontab 已配置：每日 08:15 同步 + 09:00 早报 + 每5分钟实时值/告警 + 每5分钟 Streamlit 健康守护"
 }
 
 start_streamlit() {
