@@ -40,7 +40,7 @@ from app.db.models import (
     BtcRsi,
 )
 from app.services.alert_notifier import send_alert_message
-from btc.indicators_rsi import compute_wilder_rsi
+from btc.indicators_rsi import compute_wilder_rsi, load_price_history
 from btc.percentile_runtime import calculate_dynamic_percentile
 from btc.realtime import _fetch_realtime_price
 
@@ -402,12 +402,8 @@ def build_inputs_realtime() -> BottomScoreInputs:
     price_now = _fetch_realtime_price()
 
     with SessionLocal() as session:
-        close_rows = session.execute(select(BtcPrice.close).order_by(BtcPrice.date.asc())).all()
-        close_series = pd.Series([float(r.close) for r in close_rows], dtype="float64")
-        close_with_now = pd.concat(
-            [close_series, pd.Series([float(price_now)], dtype="float64")],
-            ignore_index=True,
-        )
+        close_df = load_price_history()
+        close_series = pd.to_numeric(close_df["close"], errors="coerce").dropna().astype("float64")
 
         window = close_series.iloc[-WINDOW_DAYS_2Y:] if len(close_series) else close_series
         if len(window):
@@ -415,8 +411,8 @@ def build_inputs_realtime() -> BottomScoreInputs:
         else:
             close_2y_low = float(price_now)
 
-        rsi6_now = _to_float(compute_wilder_rsi(close_with_now, period=6).iloc[-1])
-        rsi12_now = _to_float(compute_wilder_rsi(close_with_now, period=12).iloc[-1])
+        rsi6_now = _to_float(compute_wilder_rsi(close_series, period=6).iloc[-1]) if not close_series.empty else None
+        rsi12_now = _to_float(compute_wilder_rsi(close_series, period=12).iloc[-1]) if not close_series.empty else None
 
         latest_4y = session.execute(select(Btc4yMa).order_by(Btc4yMa.date.desc()).limit(1)).scalar_one_or_none()
         latest_ahr = session.execute(select(BtcAhr999).order_by(BtcAhr999.date.desc()).limit(1)).scalar_one_or_none()
@@ -474,7 +470,7 @@ def _alerts_push_enabled() -> bool:
 
 
 def _log_realtime_alert_check(result: RealtimeAlertResult) -> None:
-    _REALTIME_ALERT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    """写入 logs/realtime_alerts.log；无权限时仅打印，不中断主流程。"""
     payload = {
         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "total_score": result.total_score,
@@ -482,8 +478,14 @@ def _log_realtime_alert_check(result: RealtimeAlertResult) -> None:
         "sent_rules": result.sent_rules,
         "skipped_rules": result.skipped_rules,
     }
-    with open(_REALTIME_ALERT_LOG, "a", encoding="utf-8") as f:
-        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    line = json.dumps(payload, ensure_ascii=False)
+    try:
+        _REALTIME_ALERT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(_REALTIME_ALERT_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError as exc:
+        print(f"[alert_engine] 无法写入 {_REALTIME_ALERT_LOG}: {exc}")
+        print(f"[alert_engine] {line}")
 
 
 def check_realtime_alerts(*, dry_run: bool = False, push: bool | None = None) -> RealtimeAlertResult:

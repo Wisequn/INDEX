@@ -11,7 +11,12 @@ RSI 指标计算脚本。
 
 from __future__ import annotations
 
+import json
+import ssl
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 import pandas as pd
 from sqlalchemy import select
@@ -19,18 +24,72 @@ from sqlalchemy import select
 from app.db.database import SessionLocal, init_db, upsert_by_date
 from app.db.models import BtcPrice, BtcRsi
 
+BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
+
 
 def load_price_history() -> pd.DataFrame:
     """
     从数据库读取 btc_price 的历史收盘价，并按日期升序排序。
     """
+    try:
+        binance_df = load_price_history_from_binance()
+        if not binance_df.empty:
+            return binance_df
+    except Exception:
+        # 网络抖动或证书问题时，回退到本地 btc_price，保证任务可继续运行
+        pass
+
     with SessionLocal() as session:
         rows = session.execute(select(BtcPrice.date, BtcPrice.close).order_by(BtcPrice.date.asc())).all()
-
     if not rows:
         return pd.DataFrame(columns=["date", "close"])
-
     return pd.DataFrame(rows, columns=["date", "close"])
+
+
+def load_price_history_from_binance(*, interval: str = "1d", chunks: int = 5) -> pd.DataFrame:
+    """
+    从 Binance Kline 拉取最近若干批历史收盘价。
+
+    - 每批 1000 根 K 线，默认 chunks=5（最多约 5000 天，够 RSI 计算）
+    - 优先用于 RSI，避免与交易所图表口径不一致
+    """
+    ssl_ctx = ssl.create_default_context()
+    insecure_ssl_ctx = ssl._create_unverified_context()
+    out: list[dict[str, float | str]] = []
+    end_time_ms: int | None = None
+
+    for _ in range(chunks):
+        query = {"symbol": "BTCUSDT", "interval": interval, "limit": 1000}
+        if end_time_ms is not None:
+            query["endTime"] = end_time_ms
+        url = f"{BINANCE_KLINES_URL}?{urlencode(query)}"
+        try:
+            with urlopen(url, timeout=20, context=ssl_ctx) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            if "CERTIFICATE_VERIFY_FAILED" not in str(exc):
+                raise
+            # 与 realtime ticker 保持一致：证书链异常时尝试不校验兜底
+            with urlopen(url, timeout=20, context=insecure_ssl_ctx) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        if not payload:
+            break
+
+        for row in payload:
+            # row[0] 开盘时间（ms），用 UTC 日期作为索引
+            dt = datetime.fromtimestamp(int(row[0]) / 1000, tz=timezone.utc).date().isoformat()
+            out.append({"date": dt, "close": float(row[4])})
+
+        first_open_ms = int(payload[0][0])
+        end_time_ms = first_open_ms - 1
+        if len(payload) < 1000:
+            break
+
+    if not out:
+        return pd.DataFrame(columns=["date", "close"])
+
+    df = pd.DataFrame(out).drop_duplicates(subset=["date"], keep="last")
+    return df.sort_values("date").reset_index(drop=True)
 
 
 def compute_wilder_rsi(close_series: pd.Series, period: int) -> pd.Series:
