@@ -173,7 +173,7 @@ def _factor_scores_from_inputs(inp: BottomScoreInputs) -> dict[str, int]:
     if inp.value is not None and inp.fg_pct_ui is not None:
         if inp.value <= 8 and inp.fg_pct_ui < 0.5:
             out["4B"] = -10
-        elif inp.value < 12 and inp.fg_pct_ui < 2:
+        elif inp.value <= 12 and inp.fg_pct_ui < 2:
             out["4A"] = -5
 
     # Ahr999：5C > 5B > 5A（5C 触发时 5A、5B 强制为 0）

@@ -104,7 +104,7 @@ def _hit_4a(inp: BottomScoreInputs) -> bool:
     return (
         inp.value is not None
         and inp.fg_pct_ui is not None
-        and inp.value < 12
+        and inp.value <= 12
         and inp.fg_pct_ui < 2
     )
 
