@@ -26,7 +26,11 @@ from app.db.database import init_db
 from app.ui.chart_history import load_full_chart_dataframe
 from btc.realtime import get_realtime_values
 from btc.percentile_runtime import calculate_dynamic_percentile
-from scheduler.alert_engine import build_inputs_realtime, calculate_total_score, get_factor_scores
+from scheduler.alert_engine import (
+    build_inputs_realtime,
+    calculate_normalized_score_and_position,
+    get_factor_scores,
+)
 
 # 建表 + 幂等清理旧百分位列（@st.cache_data 内部也会 init_db，此处保证首屏前迁移已执行）
 init_db()
@@ -904,12 +908,12 @@ realtime_map = get_realtime_values(window=_window)
 
 
 @st.cache_data(ttl=120, show_spinner=False)
-def _load_realtime_factor_scores() -> tuple[dict[str, int], int]:
-    """基于 2Y 实时输入计算各因子得分与总分（与 alert_engine 一致）。"""
+def _load_realtime_factor_scores() -> tuple[dict[str, int], int, int]:
+    """基于 2Y 实时输入计算各因子得分、归一化总分与建议仓位。"""
     inp = build_inputs_realtime()
     scores = get_factor_scores(inputs=inp)
-    total = calculate_total_score(inputs=inp)
-    return scores, total
+    meta = calculate_normalized_score_and_position(inputs=inp)
+    return scores, meta["normalized_score"], meta["suggested_position"]
 
 
 def _fmt_factor_cell(scores: dict[str, int], *codes: str) -> str:
@@ -956,10 +960,11 @@ def _fmt_current(indicator_code: str) -> str:
 
 
 if _window == "2Y":
-    _factor_scores, _total_score = _load_realtime_factor_scores()
+    _factor_scores, _total_score, _suggested_position = _load_realtime_factor_scores()
 else:
     _factor_scores = {k: 0 for k in ("1A", "2A", "2B", "3A", "3B", "4A", "4B", "5A", "5B", "5C", "6A", "6B")}
     _total_score = 0
+    _suggested_position = 0
 
 _score_empty = "—" if _window != "2Y" else "0"
 _fg_score = _fmt_factor_cell(_factor_scores, "4A", "4B") if _window == "2Y" else _score_empty
@@ -1060,8 +1065,12 @@ info_rows = [
         "指标代码": "—",
         "中文名称": "总分",
         "当前值": "—",
-        "评分": str(_total_score) if _window == "2Y" else _score_empty,
-        "指标解释": "13 因子扣分累加（2Y 实时，越低越接近抄底信号）",
+        "评分": (
+            f"{_total_score}（建议仓位 {_suggested_position}%）"
+            if _window == "2Y"
+            else _score_empty
+        ),
+        "指标解释": "归一化总分 0~100（原始扣分按 60 分满额折算；2Y 实时）",
     },
 ]
 

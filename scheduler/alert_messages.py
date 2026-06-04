@@ -10,7 +10,7 @@ from typing import Any
 from scheduler.alert_engine import BottomScoreInputs
 
 # 严格使用用户提供的模板（占位符名与 build_format_context 一致）
-_ALERT_SCORE_SUFFIX = "，当前BTC下跌因子总分: {total_score} / 100，建议仓位：{total_score}%"
+_ALERT_SCORE_SUFFIX = "，当前BTC下跌因子总分: {total_score} / 100，建议仓位：{suggested_position}%"
 
 ALERT_TEMPLATES: dict[str, str] = {
     "1A": f"🚨 BTC跌至近2年低点！当前价格：{{close}}（当前BTC价格：{{close}}）{_ALERT_SCORE_SUFFIX}",
@@ -171,19 +171,14 @@ def evaluate_triggered_alert_rules(inp: BottomScoreInputs) -> list[str]:
     return rules
 
 
-def _display_total_score(raw_score: int | None) -> str:
-    """展示用总分与建议仓位（0~100，取扣分绝对值上限 100）。"""
-    if raw_score is None:
-        return "0"
-    return str(min(100, abs(int(raw_score))))
-
-
 def build_format_context(
     inp: BottomScoreInputs,
     *,
+    score_meta: dict[str, int] | None = None,
     total_score: int | None = None,
 ) -> dict[str, str]:
-    """将数值格式化为模板字符串。"""
+    """将数值格式化为模板字符串（总分/仓位使用归一化结果）。"""
+    from scheduler.alert_engine import calculate_normalized_score_and_position
 
     def _f(v: float | None, nd: int = 4) -> str:
         if v is None:
@@ -192,10 +187,15 @@ def build_format_context(
             return f"{v:,.0f}"
         return f"{v:.{nd}f}"
 
-    if total_score is None:
-        total_score = getattr(inp, "total_score", 0)
+    if score_meta is None:
+        raw = total_score if total_score is not None else getattr(inp, "total_score", None)
+        if raw is not None:
+            score_meta = calculate_normalized_score_and_position(raw_score=int(raw))
+        else:
+            score_meta = calculate_normalized_score_and_position(inputs=inp)
 
-    score_ui = _display_total_score(total_score)
+    norm = int(score_meta["normalized_score"])
+    pos = int(score_meta["suggested_position"])
 
     return {
         "close": _f(inp.close, 2),
@@ -209,7 +209,8 @@ def build_format_context(
         "ahr999_pct_ui": _f(inp.ahr999_pct_ui, 2),
         "price_to_4y_ma": _f(inp.price_to_4y_ma, 4),
         "price_to_200w_ma": _f(getattr(inp, "price_to_200w_ma", None), 4),
-        "total_score": score_ui,
+        "total_score": str(norm),
+        "suggested_position": str(pos),
         "report_date": str(getattr(inp, "report_date", "")),
     }
 
@@ -218,11 +219,14 @@ def format_alert_message(
     rule_code: str,
     inp: BottomScoreInputs,
     *,
+    score_meta: dict[str, int] | None = None,
     total_score: int | None = None,
 ) -> str:
-    """生成实时告警文案；total_score 为 calculate_total_score() 的原始扣分总和。"""
+    """生成实时告警文案；score_meta 含 raw_score / normalized_score / suggested_position。"""
     template = ALERT_TEMPLATES[rule_code]
-    return template.format(**build_format_context(inp, total_score=total_score))
+    return template.format(
+        **build_format_context(inp, score_meta=score_meta, total_score=total_score)
+    )
 
 
 def format_daily_briefing(brief: BriefingSnapshot) -> str:

@@ -27,6 +27,7 @@ from app.db.models import Btc200wMa, BtcPrice
 from app.services.alert_notifier import send_daily_report_message
 from scheduler.alert_engine import (
     build_inputs_for_date,
+    calculate_normalized_score_and_position,
     calculate_total_score,
     persist_bottom_score_for_date,
 )
@@ -62,6 +63,7 @@ def run_daily_morning_report(*, dry_run: bool = False) -> str:
 
     score = calculate_total_score(inputs=inputs)
     persist_bottom_score_for_date(data_date, score=score)
+    score_meta = calculate_normalized_score_and_position(raw_score=score)
 
     brief = BriefingSnapshot(
         close=inputs.close,
@@ -77,7 +79,7 @@ def run_daily_morning_report(*, dry_run: bool = False) -> str:
         price_to_4y_ma=inputs.price_to_4y_ma,
         price_to_200w_ma=price_to_200w,
         report_date=report_date,
-        total_score=score,
+        total_score=score_meta["normalized_score"],
     )
     text = format_daily_briefing(brief)
     send_daily_report_message(text, dry_run=dry_run)

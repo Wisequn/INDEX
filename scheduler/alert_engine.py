@@ -46,6 +46,7 @@ from btc.realtime import _fetch_realtime_price
 
 WINDOW_DAYS_2Y = 730
 ALERT_RESEND_INTERVAL_HOURS = 4
+BOTTOM_SCORE_RAW_MAX = 60  # 原始扣分理论下限约 -60，用于归一化到 0~100
 
 
 @dataclass(frozen=True)
@@ -302,6 +303,64 @@ def calculate_total_score(
             inputs=inputs,
         )
     return _accumulate_bottom_score(inp)
+
+
+def calculate_normalized_score_and_position(
+    realtime_data: dict[str, Any] | None = None,
+    *,
+    close: float | None = None,
+    close_2y_low: float | None = None,
+    rsi6: float | None = None,
+    rsi6_pct_ui: float | None = None,
+    rsi12: float | None = None,
+    rsi12_pct_ui: float | None = None,
+    value: float | None = None,
+    fg_pct_ui: float | None = None,
+    ahr999_value: float | None = None,
+    ahr999_pct_ui: float | None = None,
+    price_to_4y_ma: float | None = None,
+    inputs: BottomScoreInputs | None = None,
+    raw_score: int | None = None,
+) -> dict[str, int]:
+    """
+    原始扣分归一化到 0~100，并给出建议仓位（与归一化分数相同）。
+
+    raw_score：0 ~ -60（由 calculate_total_score 累加）
+    normalized_score / suggested_position：0~100
+    """
+    if raw_score is None:
+        raw_score = calculate_total_score(
+            realtime_data=realtime_data,
+            close=close,
+            close_2y_low=close_2y_low,
+            rsi6=rsi6,
+            rsi6_pct_ui=rsi6_pct_ui,
+            rsi12=rsi12,
+            rsi12_pct_ui=rsi12_pct_ui,
+            value=value,
+            fg_pct_ui=fg_pct_ui,
+            ahr999_value=ahr999_value,
+            ahr999_pct_ui=ahr999_pct_ui,
+            price_to_4y_ma=price_to_4y_ma,
+            inputs=inputs,
+        )
+    raw_score = int(raw_score)
+
+    if raw_score >= 0:
+        normalized_score = 0
+        suggested_position = 0
+    else:
+        normalized_score = min(
+            100,
+            int(abs(raw_score) / BOTTOM_SCORE_RAW_MAX * 100),
+        )
+        suggested_position = normalized_score
+
+    return {
+        "raw_score": raw_score,
+        "normalized_score": normalized_score,
+        "suggested_position": suggested_position,
+    }
 
 
 def _pct_2y_at_date(series_by_date: pd.Series, target_date: str) -> float | None:
@@ -598,7 +657,8 @@ def check_realtime_alerts(*, dry_run: bool = False, push: bool | None = None) ->
 
     init_db()
     inp = build_inputs_realtime()
-    total_score = calculate_total_score(inputs=inp)
+    raw_score = calculate_total_score(inputs=inp)
+    score_meta = calculate_normalized_score_and_position(raw_score=raw_score)
     triggered_rules = evaluate_triggered_alert_rules(inp)
     sent_rules: list[str] = []
     skipped_rules: list[str] = []
@@ -607,17 +667,17 @@ def check_realtime_alerts(*, dry_run: bool = False, push: bool | None = None) ->
     with SessionLocal() as session:
         for rule in triggered_rules:
             if not should_send_alert_for_rule(
-                session, rule, total_score, now=now_dt
+                session, rule, raw_score, now=now_dt
             ):
                 skipped_rules.append(rule)
                 continue
             if not push:
                 continue
-            text = format_alert_message(rule, inp, total_score=total_score)
+            text = format_alert_message(rule, inp, score_meta=score_meta)
             sent_ok = send_alert_message(text, dry_run=dry_run)
             if sent_ok and not dry_run:
                 record_alert_sent(
-                    session, rule, total_score, now=now_dt
+                    session, rule, raw_score, now=now_dt
                 )
             if sent_ok:
                 sent_rules.append(rule)
@@ -625,7 +685,7 @@ def check_realtime_alerts(*, dry_run: bool = False, push: bool | None = None) ->
             session.commit()
 
     result = RealtimeAlertResult(
-        total_score=total_score,
+        total_score=raw_score,
         triggered_rules=triggered_rules,
         sent_rules=sent_rules,
         skipped_rules=skipped_rules,
@@ -712,10 +772,11 @@ def _run_alert_message_tests() -> None:
     inp = BottomScoreInputs(rsi6=10.0, rsi6_pct_ui=0.5, close=90000.0)
     assert evaluate_triggered_alert_rules(inp) == ["2B"]
     raw_score = -10
-    msg = format_alert_message("2B", inp, total_score=raw_score)
+    score_meta = calculate_normalized_score_and_position(raw_score=raw_score)
+    msg = format_alert_message("2B", inp, score_meta=score_meta)
     assert "RSI6=10.00" in msg and "90000.00" in msg
-    assert "当前BTC下跌因子总分: 10 / 100" in msg
-    assert "建议仓位：10%" in msg
+    assert "当前BTC下跌因子总分: 16 / 100" in msg
+    assert "建议仓位：16%" in msg
     assert msg == ALERT_TEMPLATES["2B"].format(
         close="90000.00",
         rsi6="10.00",
@@ -727,7 +788,8 @@ def _run_alert_message_tests() -> None:
         ahr999_value="N/A",
         ahr999_pct_ui="N/A",
         price_to_4y_ma="N/A",
-        total_score="10",
+        total_score="16",
+        suggested_position="16",
     )
 
     brief = BriefingSnapshot(
@@ -738,7 +800,7 @@ def _run_alert_message_tests() -> None:
     )
     text = format_daily_briefing(brief)
     assert "Index 每日早报 (2026-05-27 09:00)" in text
-    assert "25 / 100" in text
+    assert "41 / 100" in text
     print("✅ 告警模板与触发规则用例全部通过")
 
 
@@ -766,6 +828,26 @@ def _run_should_send_alert_tests() -> None:
     print("✅ should_send_alert 防重复逻辑用例全部通过")
 
 
+def _run_normalize_score_tests() -> None:
+    assert calculate_normalized_score_and_position(raw_score=0) == {
+        "raw_score": 0,
+        "normalized_score": 0,
+        "suggested_position": 0,
+    }
+    assert calculate_normalized_score_and_position(raw_score=-30) == {
+        "raw_score": -30,
+        "normalized_score": 50,
+        "suggested_position": 50,
+    }
+    assert calculate_normalized_score_and_position(raw_score=-60) == {
+        "raw_score": -60,
+        "normalized_score": 100,
+        "suggested_position": 100,
+    }
+    assert calculate_normalized_score_and_position(raw_score=-90)["normalized_score"] == 100
+    print("✅ calculate_normalized_score_and_position 用例全部通过")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -773,6 +855,7 @@ if __name__ == "__main__":
     parser.add_argument("--test", action="store_true", help="仅跑内置打分用例")
     parser.add_argument("--test-alerts", action="store_true", help="跑告警模板与触发用例")
     parser.add_argument("--test-dedup", action="store_true", help="跑 alert_history 防重复用例")
+    parser.add_argument("--test-normalize", action="store_true", help="跑分数归一化用例")
     parser.add_argument("--alerts", action="store_true", help="执行一次实时告警检测并推送")
     parser.add_argument("--alerts-dry-run", action="store_true", help="实时告警仅写本地日志")
     parser.add_argument("--daily-briefing", action="store_true", help="发送每日早报")
@@ -787,6 +870,8 @@ if __name__ == "__main__":
         _run_alert_message_tests()
     elif args.test_dedup:
         _run_should_send_alert_tests()
+    elif args.test_normalize:
+        _run_normalize_score_tests()
     elif args.alerts or args.alerts_dry_run:
         result = check_realtime_alerts(dry_run=args.alerts_dry_run, push=True)
         print(
