@@ -132,7 +132,7 @@ def _hit_5c(inp: BottomScoreInputs) -> bool:
 
 
 def _hit_6b(inp: BottomScoreInputs) -> bool:
-    return inp.price_to_4y_ma is not None and inp.price_to_4y_ma < 0.8
+    return inp.price_to_4y_ma is not None and inp.price_to_4y_ma < 1.0
 
 
 def _hit_6a(inp: BottomScoreInputs) -> bool:

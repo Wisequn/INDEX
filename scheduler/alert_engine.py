@@ -196,7 +196,7 @@ def _factor_scores_from_inputs(inp: BottomScoreInputs) -> dict[str, int]:
 
     # 价格/4年均线：6B > 6A
     if inp.price_to_4y_ma is not None:
-        if inp.price_to_4y_ma < 0.8:
+        if inp.price_to_4y_ma < 1.0:
             out["6B"] = -10
         elif inp.price_to_4y_ma < 1.1:
             out["6A"] = -5
@@ -747,6 +747,8 @@ def _run_self_tests() -> None:
             -5 - 10 - 15 - 10,
             "1A+2B+5C+6B",
         ),
+        (BottomScoreInputs(price_to_4y_ma=0.95), -10, "仅 6B (<1.0)"),
+        (BottomScoreInputs(price_to_4y_ma=1.05), -5, "仅 6A (1.0~1.1)"),
     ]
     for inputs, expected, name in cases:
         got = calculate_total_score(inputs=inputs)
