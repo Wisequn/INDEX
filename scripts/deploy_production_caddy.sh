@@ -23,7 +23,6 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENV_DIR="$PROJECT_DIR/.venv"
-PYTHON_BIN="${PYTHON_BIN:-python3.14}"
 STREAMLIT_PORT="${STREAMLIT_PORT:-8504}"
 CADDY_CONFIG_DIR="${CADDY_CONFIG_DIR:-/etc/caddy}"
 CADDY_MAIN_FILE="$CADDY_CONFIG_DIR/Caddyfile"
@@ -40,6 +39,24 @@ info() { echo "ℹ️  $1"; }
 require_cmd() {
   local cmd="$1"
   command -v "$cmd" >/dev/null 2>&1 || fail "缺少命令：$cmd"
+}
+
+resolve_python_bin() {
+  # 优先环境变量，其次 python3.14，再回退到常见 python3
+  if [ -n "${PYTHON_BIN:-}" ] && command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    :
+  elif command -v python3.14 >/dev/null 2>&1; then
+    PYTHON_BIN="python3.14"
+  elif command -v python3.12 >/dev/null 2>&1; then
+    PYTHON_BIN="python3.12"
+  elif command -v python3.11 >/dev/null 2>&1; then
+    PYTHON_BIN="python3.11"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+  else
+    fail "未找到 Python（可设置 PYTHON_BIN=python3）"
+  fi
+  info "使用 Python：$PYTHON_BIN ($($PYTHON_BIN --version 2>&1))"
 }
 
 append_caddy_block_if_missing() {
@@ -129,6 +146,7 @@ main() {
   cd "$PROJECT_DIR"
   ok "开始生产部署（Caddy + Streamlit 8504）"
 
+  resolve_python_bin
   require_cmd "$PYTHON_BIN"
   require_cmd caddy
   require_cmd crontab
@@ -138,7 +156,7 @@ main() {
 
   # 1) 创建 venv + 安装依赖
   if [ ! -d "$VENV_DIR" ]; then
-    "$PYTHON_BIN" -m venv "$VENV_DIR" || fail "创建虚拟环境失败（python3.14）"
+    "$PYTHON_BIN" -m venv "$VENV_DIR" || fail "创建虚拟环境失败（$PYTHON_BIN）"
     ok "虚拟环境创建成功：$VENV_DIR"
   else
     ok "虚拟环境已存在：$VENV_DIR"
