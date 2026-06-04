@@ -801,6 +801,20 @@ def _run_alert_message_tests() -> None:
     text = format_daily_briefing(brief)
     assert "Index 每日早报 (2026-05-27 09:00)" in text
     assert "41 / 100" in text
+
+    # 回归：早报曾把归一化分误当作 raw_score，导致展示 0/100
+    meta58 = calculate_normalized_score_and_position(raw_score=-35)
+    broken = BriefingSnapshot(close=64316.53, rsi6=7.91, rsi6_pct_ui=0.48, report_date="2026-06-04")
+    assert "0 / 100" in format_daily_briefing(
+        BriefingSnapshot(
+            close=broken.close,
+            rsi6=broken.rsi6,
+            rsi6_pct_ui=broken.rsi6_pct_ui,
+            report_date=broken.report_date,
+            total_score=meta58["normalized_score"],
+        )
+    )
+    assert "58 / 100" in format_daily_briefing(broken, score_meta=meta58)
     print("✅ 告警模板与触发规则用例全部通过")
 
 

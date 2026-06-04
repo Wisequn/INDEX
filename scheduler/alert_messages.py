@@ -229,5 +229,10 @@ def format_alert_message(
     )
 
 
-def format_daily_briefing(brief: BriefingSnapshot) -> str:
-    return DAILY_BRIEFING_TEMPLATE.format(**build_format_context(brief))
+def format_daily_briefing(
+    brief: BriefingSnapshot,
+    *,
+    score_meta: dict[str, int] | None = None,
+) -> str:
+    """生成早报正文；请传入 score_meta，勿将归一化分写入 brief.total_score。"""
+    return DAILY_BRIEFING_TEMPLATE.format(**build_format_context(brief, score_meta=score_meta))

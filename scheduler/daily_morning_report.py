@@ -79,9 +79,8 @@ def run_daily_morning_report(*, dry_run: bool = False) -> str:
         price_to_4y_ma=inputs.price_to_4y_ma,
         price_to_200w_ma=price_to_200w,
         report_date=report_date,
-        total_score=score_meta["normalized_score"],
     )
-    text = format_daily_briefing(brief)
+    text = format_daily_briefing(brief, score_meta=score_meta)
     send_daily_report_message(text, dry_run=dry_run)
     return text
 
