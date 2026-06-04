@@ -116,8 +116,23 @@ class MarketData(Base):
     )
 
 
+class BtcAlertHistory(Base):
+    """实时告警发送历史：按规则记录上次发送时间与总分（用于防重复）。"""
+
+    __tablename__ = "alert_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rule_code = Column(String(8), nullable=False, unique=True, index=True, comment="因子代码，如 2B")
+    last_sent_time = Column(String(19), nullable=False, comment="上次成功发送时间 YYYY-MM-DD HH:MM:SS")
+    last_total_score = Column(Integer, nullable=False, comment="上次发送时的抄底分数总分（原始扣分）")
+
+    __table_args__ = (
+        UniqueConstraint("rule_code", name="uq_alert_history_rule_code"),
+    )
+
+
 class BtcAlertDedup(Base):
-    """实时告警去重：同一规则在同一自然日只推送一次。"""
+    """实时告警去重（旧表，已由 alert_history 替代，保留兼容）。"""
 
     __tablename__ = "btc_alert_dedup"
 

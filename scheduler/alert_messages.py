@@ -10,19 +10,21 @@ from typing import Any
 from scheduler.alert_engine import BottomScoreInputs
 
 # 严格使用用户提供的模板（占位符名与 build_format_context 一致）
+_ALERT_SCORE_SUFFIX = "，当前BTC下跌因子总分: {total_score} / 100，建议仓位：{total_score}%"
+
 ALERT_TEMPLATES: dict[str, str] = {
-    "1A": "🚨 BTC跌至近2年低点！当前价格：{close}（当前BTC价格：{close}）",
-    "2A": "⚠️ 短期下跌较快，可能是短期低点。RSI6={rsi6}，RSI6%={rsi6_pct_ui}（当前BTC价格：{close}）",
-    "2B": "🔥 短期超跌严重，建议抄底！RSI6={rsi6}，RSI6%={rsi6_pct_ui}（当前BTC价格：{close}）",
-    "3A": "⚠️ 中短期下跌较快，可能是短期低点。RSI12={rsi12}，RSI12%={rsi12_pct_ui}（当前BTC价格：{close}）",
-    "3B": "🔥 短期超跌严重，具备抄底条件！RSI12={rsi12}，RSI12%={rsi12_pct_ui}（当前BTC价格：{close}）",
-    "4A": "😰 近期出现恐慌情绪，请继续观测是否具备抄底条件。FearGreed={value}（当前BTC价格：{close}）",
-    "4B": "😱 极度恐慌！近两天可能出现抄底低点。FearGreed={value}（当前BTC价格：{close}）",
-    "5A": "📉 BTC具备定投条件了，可以开始少量定投。Ahr999={ahr999_value}（当前BTC价格：{close}）",
-    "5B": "📉 进入熊市周期，可以抄底或持续定投。Ahr999={ahr999_value}（当前BTC价格：{close}）",
-    "5C": "🔥 相信跌了很多了，可以满仓了吧？Ahr999={ahr999_value}（当前BTC价格：{close}）",
-    "6A": "⚾ BTC进入击球区了！价格/4年均线={price_to_4y_ma}（当前BTC价格：{close}）",
-    "6B": "🔥 可以满仓了吧？价格/4年均线={price_to_4y_ma}（当前BTC价格：{close}）",
+    "1A": f"🚨 BTC跌至近2年低点！当前价格：{{close}}（当前BTC价格：{{close}}）{_ALERT_SCORE_SUFFIX}",
+    "2A": f"⚠️ 短期下跌较快，可能是短期低点。RSI6={{rsi6}}，RSI6%={{rsi6_pct_ui}}（当前BTC价格：{{close}}）{_ALERT_SCORE_SUFFIX}",
+    "2B": f"🔥 短期超跌严重，建议抄底！RSI6={{rsi6}}，RSI6%={{rsi6_pct_ui}}（当前BTC价格：{{close}}）{_ALERT_SCORE_SUFFIX}",
+    "3A": f"⚠️ 中短期下跌较快，可能是短期低点。RSI12={{rsi12}}，RSI12%={{rsi12_pct_ui}}（当前BTC价格：{{close}}）{_ALERT_SCORE_SUFFIX}",
+    "3B": f"🔥 短期超跌严重，具备抄底条件！RSI12={{rsi12}}，RSI12%={{rsi12_pct_ui}}（当前BTC价格：{{close}}）{_ALERT_SCORE_SUFFIX}",
+    "4A": f"😰 近期出现恐慌情绪，请继续观测是否具备抄底条件。FearGreed={{value}}（当前BTC价格：{{close}}）{_ALERT_SCORE_SUFFIX}",
+    "4B": f"😱 极度恐慌！近两天可能出现抄底低点。FearGreed={{value}}（当前BTC价格：{{close}}）{_ALERT_SCORE_SUFFIX}",
+    "5A": f"📉 BTC具备定投条件了，可以开始少量定投。Ahr999={{ahr999_value}}（当前BTC价格：{{close}}）{_ALERT_SCORE_SUFFIX}",
+    "5B": f"📉 进入熊市周期，可以抄底或持续定投。Ahr999={{ahr999_value}}（当前BTC价格：{{close}}）{_ALERT_SCORE_SUFFIX}",
+    "5C": f"🔥 相信跌了很多了，可以满仓了吧？Ahr999={{ahr999_value}}（当前BTC价格：{{close}}）{_ALERT_SCORE_SUFFIX}",
+    "6A": f"⚾ BTC进入击球区了！价格/4年均线={{price_to_4y_ma}}（当前BTC价格：{{close}}）{_ALERT_SCORE_SUFFIX}",
+    "6B": f"🔥 可以满仓了吧？价格/4年均线={{price_to_4y_ma}}（当前BTC价格：{{close}}）{_ALERT_SCORE_SUFFIX}",
 }
 
 DAILY_BRIEFING_TEMPLATE = """Index 每日早报 ({report_date} 09:00)
@@ -156,12 +158,12 @@ def evaluate_triggered_alert_rules(inp: BottomScoreInputs) -> list[str]:
         rules.append("4B")
     elif _hit_4a(inp):
         rules.append("4A")
-    if _hit_5b(inp):
+    if _hit_5c(inp):
+        rules.append("5C")
+    elif _hit_5b(inp):
         rules.append("5B")
     elif _hit_5a(inp):
         rules.append("5A")
-    if _hit_5c(inp):
-        rules.append("5C")
     if _hit_6b(inp):
         rules.append("6B")
     elif _hit_6a(inp):
@@ -169,7 +171,18 @@ def evaluate_triggered_alert_rules(inp: BottomScoreInputs) -> list[str]:
     return rules
 
 
-def build_format_context(inp: BottomScoreInputs) -> dict[str, str]:
+def _display_total_score(raw_score: int | None) -> str:
+    """展示用总分与建议仓位（0~100，取扣分绝对值上限 100）。"""
+    if raw_score is None:
+        return "0"
+    return str(min(100, abs(int(raw_score))))
+
+
+def build_format_context(
+    inp: BottomScoreInputs,
+    *,
+    total_score: int | None = None,
+) -> dict[str, str]:
     """将数值格式化为模板字符串。"""
 
     def _f(v: float | None, nd: int = 4) -> str:
@@ -178,6 +191,11 @@ def build_format_context(inp: BottomScoreInputs) -> dict[str, str]:
         if nd == 0:
             return f"{v:,.0f}"
         return f"{v:.{nd}f}"
+
+    if total_score is None:
+        total_score = getattr(inp, "total_score", 0)
+
+    score_ui = _display_total_score(total_score)
 
     return {
         "close": _f(inp.close, 2),
@@ -191,14 +209,20 @@ def build_format_context(inp: BottomScoreInputs) -> dict[str, str]:
         "ahr999_pct_ui": _f(inp.ahr999_pct_ui, 2),
         "price_to_4y_ma": _f(inp.price_to_4y_ma, 4),
         "price_to_200w_ma": _f(getattr(inp, "price_to_200w_ma", None), 4),
-        "total_score": str(min(100, abs(int(getattr(inp, "total_score", 0))))),
+        "total_score": score_ui,
         "report_date": str(getattr(inp, "report_date", "")),
     }
 
 
-def format_alert_message(rule_code: str, inp: BottomScoreInputs) -> str:
+def format_alert_message(
+    rule_code: str,
+    inp: BottomScoreInputs,
+    *,
+    total_score: int | None = None,
+) -> str:
+    """生成实时告警文案；total_score 为 calculate_total_score() 的原始扣分总和。"""
     template = ALERT_TEMPLATES[rule_code]
-    return template.format(**build_format_context(inp))
+    return template.format(**build_format_context(inp, total_score=total_score))
 
 
 def format_daily_briefing(brief: BriefingSnapshot) -> str:

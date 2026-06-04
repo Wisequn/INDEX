@@ -33,7 +33,7 @@ from app.db.database import SessionLocal, init_db, upsert_by_date, upsert_by_uni
 from app.db.models import (
     Btc4yMa,
     BtcAhr999,
-    BtcAlertDedup,
+    BtcAlertHistory,
     BtcBottomScore,
     BtcFearGreed,
     BtcPrice,
@@ -45,6 +45,7 @@ from btc.percentile_runtime import calculate_dynamic_percentile
 from btc.realtime import _fetch_realtime_price
 
 WINDOW_DAYS_2Y = 730
+ALERT_RESEND_INTERVAL_HOURS = 4
 
 
 @dataclass(frozen=True)
@@ -76,15 +77,6 @@ class RealtimeAlertResult:
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _REALTIME_ALERT_LOG = _PROJECT_ROOT / "logs" / "realtime_alerts.log"
-
-
-def _ab_pair_score(a_hit: bool, a_points: int, b_hit: bool, b_points: int) -> int:
-    """B 触发时返回 B 分；否则 A 触发返回 A 分；否则 0。"""
-    if b_hit:
-        return b_points
-    if a_hit:
-        return a_points
-    return 0
 
 
 def _merge_score_inputs(
@@ -129,6 +121,88 @@ def _merge_score_inputs(
     )
 
 
+def _accumulate_bottom_score(inp: BottomScoreInputs) -> int:
+    """
+    按优先级 + 互斥规则累加抄底分数（与各组 if/elif 一致）。
+    """
+    score = 0
+    scores = _factor_scores_from_inputs(inp)
+    return int(sum(scores.values()))
+
+
+def _factor_scores_from_inputs(inp: BottomScoreInputs) -> dict[str, int]:
+    """13 因子单项得分；同组仅最高优先级因子非 0。"""
+    out: dict[str, int] = {
+        "1A": 0,
+        "2A": 0,
+        "2B": 0,
+        "3A": 0,
+        "3B": 0,
+        "4A": 0,
+        "4B": 0,
+        "5A": 0,
+        "5B": 0,
+        "5C": 0,
+        "6A": 0,
+        "6B": 0,
+    }
+
+    # 1A
+    if (
+        inp.close is not None
+        and inp.close_2y_low is not None
+        and inp.close == inp.close_2y_low
+    ):
+        out["1A"] = -5
+
+    # RSI6：2B > 2A
+    if inp.rsi6 is not None and inp.rsi6_pct_ui is not None:
+        if inp.rsi6 < 12 and inp.rsi6_pct_ui < 1:
+            out["2B"] = -10
+        elif inp.rsi6 < 12 and inp.rsi6_pct_ui < 5:
+            out["2A"] = -5
+
+    # RSI12：3B > 3A
+    if inp.rsi12 is not None and inp.rsi12_pct_ui is not None:
+        if inp.rsi12 < 15 and inp.rsi12_pct_ui < 1:
+            out["3B"] = -10
+        elif inp.rsi12 < 25 and inp.rsi12_pct_ui < 5:
+            out["3A"] = -5
+
+    # FearGreed：4B > 4A
+    if inp.value is not None and inp.fg_pct_ui is not None:
+        if inp.value <= 8 and inp.fg_pct_ui < 0.5:
+            out["4B"] = -10
+        elif inp.value < 12 and inp.fg_pct_ui < 2:
+            out["4A"] = -5
+
+    # Ahr999：5C > 5B > 5A（5C 触发时 5A、5B 强制为 0）
+    if inp.ahr999_value is not None:
+        if inp.ahr999_value < 0.35:
+            out["5C"] = -15
+        elif (
+            inp.ahr999_pct_ui is not None
+            and inp.ahr999_value < 0.45
+            and inp.ahr999_pct_ui < 3
+        ):
+            out["5B"] = -10
+        elif (
+            inp.ahr999_pct_ui is not None
+            and inp.ahr999_value < 0.85
+            and inp.ahr999_pct_ui < 3
+        ):
+            out["5A"] = -5
+
+    # 价格/4年均线：6B > 6A
+    if inp.price_to_4y_ma is not None:
+        if inp.price_to_4y_ma < 0.8:
+            out["6B"] = -10
+        elif inp.price_to_4y_ma < 1.1:
+            out["6A"] = -5
+
+    return out
+
+
 def get_factor_scores(
     *,
     close: float | None = None,
@@ -144,10 +218,7 @@ def get_factor_scores(
     price_to_4y_ma: float | None = None,
     inputs: BottomScoreInputs | None = None,
 ) -> dict[str, int]:
-    """
-    返回 13 个因子的单项得分（未触发为 0）。
-    A/B 对中 B 触发时 A 为 0；5C 可与 5A/5B 同时非 0。
-    """
+    """返回 13 个因子的单项得分（未触发为 0，同组互斥）。"""
     inp = _merge_score_inputs(
         close=close,
         close_2y_low=close_2y_low,
@@ -162,81 +233,38 @@ def get_factor_scores(
         price_to_4y_ma=price_to_4y_ma,
         inputs=inputs,
     )
+    return _factor_scores_from_inputs(inp)
 
-    hit_1a = (
-        inp.close is not None
-        and inp.close_2y_low is not None
-        and inp.close == inp.close_2y_low
-    )
-    hit_2a = (
-        inp.rsi6 is not None
-        and inp.rsi6_pct_ui is not None
-        and inp.rsi6 < 12
-        and inp.rsi6_pct_ui < 5
-    )
-    hit_2b = (
-        inp.rsi6 is not None
-        and inp.rsi6_pct_ui is not None
-        and inp.rsi6 < 12
-        and inp.rsi6_pct_ui < 1
-    )
-    hit_3a = (
-        inp.rsi12 is not None
-        and inp.rsi12_pct_ui is not None
-        and inp.rsi12 < 25
-        and inp.rsi12_pct_ui < 5
-    )
-    hit_3b = (
-        inp.rsi12 is not None
-        and inp.rsi12_pct_ui is not None
-        and inp.rsi12 < 15
-        and inp.rsi12_pct_ui < 1
-    )
-    hit_4a = (
-        inp.value is not None
-        and inp.fg_pct_ui is not None
-        and inp.value < 12
-        and inp.fg_pct_ui < 2
-    )
-    hit_4b = (
-        inp.value is not None
-        and inp.fg_pct_ui is not None
-        and inp.value <= 8
-        and inp.fg_pct_ui < 0.5
-    )
-    hit_5a = (
-        inp.ahr999_value is not None
-        and inp.ahr999_pct_ui is not None
-        and inp.ahr999_value < 0.85
-        and inp.ahr999_pct_ui < 3
-    )
-    hit_5b = (
-        inp.ahr999_value is not None
-        and inp.ahr999_pct_ui is not None
-        and inp.ahr999_value < 0.45
-        and inp.ahr999_pct_ui < 3
-    )
-    hit_5c = inp.ahr999_value is not None and inp.ahr999_value < 0.35
-    hit_6a = inp.price_to_4y_ma is not None and inp.price_to_4y_ma < 1.1
-    hit_6b = inp.price_to_4y_ma is not None and inp.price_to_4y_ma < 0.8
 
-    return {
-        "1A": -5 if hit_1a else 0,
-        "2A": -5 if hit_2a and not hit_2b else 0,
-        "2B": -10 if hit_2b else 0,
-        "3A": -5 if hit_3a and not hit_3b else 0,
-        "3B": -10 if hit_3b else 0,
-        "4A": -5 if hit_4a and not hit_4b else 0,
-        "4B": -10 if hit_4b else 0,
-        "5A": -5 if hit_5a and not hit_5b else 0,
-        "5B": -10 if hit_5b else 0,
-        "5C": -15 if hit_5c else 0,
-        "6A": -5 if hit_6a and not hit_6b else 0,
-        "6B": -10 if hit_6b else 0,
-    }
+def _inputs_from_realtime_data(realtime_data: dict[str, Any]) -> BottomScoreInputs:
+    """从 realtime 字典构建打分输入（键名与指标说明表一致）。"""
+
+    def _f(key: str) -> float | None:
+        v = realtime_data.get(key)
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    return BottomScoreInputs(
+        close=_f("close"),
+        close_2y_low=_f("close_2y_low"),
+        rsi6=_f("rsi6"),
+        rsi6_pct_ui=_f("rsi6_pct_ui"),
+        rsi12=_f("rsi12"),
+        rsi12_pct_ui=_f("rsi12_pct_ui"),
+        value=_f("value"),
+        fg_pct_ui=_f("fg_pct_ui"),
+        ahr999_value=_f("ahr999_value"),
+        ahr999_pct_ui=_f("ahr999_pct_ui"),
+        price_to_4y_ma=_f("price_to_4y_ma"),
+    )
 
 
 def calculate_total_score(
+    realtime_data: dict[str, Any] | None = None,
     *,
     close: float | None = None,
     close_2y_low: float | None = None,
@@ -252,25 +280,28 @@ def calculate_total_score(
     inputs: BottomScoreInputs | None = None,
 ) -> int:
     """
-    按 B 规则（13 因子）计算抄底分数总分，返回 int。
+    按 13 因子优先级 + 互斥规则计算抄底分数总分。
 
-    也可传入 BottomScoreInputs 实例（关键字参数优先于 inputs 字段）。
+    可传入 realtime_data 字典，或 BottomScoreInputs / 关键字参数。
     """
-    scores = get_factor_scores(
-        close=close,
-        close_2y_low=close_2y_low,
-        rsi6=rsi6,
-        rsi6_pct_ui=rsi6_pct_ui,
-        rsi12=rsi12,
-        rsi12_pct_ui=rsi12_pct_ui,
-        value=value,
-        fg_pct_ui=fg_pct_ui,
-        ahr999_value=ahr999_value,
-        ahr999_pct_ui=ahr999_pct_ui,
-        price_to_4y_ma=price_to_4y_ma,
-        inputs=inputs,
-    )
-    return int(sum(scores.values()))
+    if realtime_data is not None:
+        inp = _inputs_from_realtime_data(realtime_data)
+    else:
+        inp = _merge_score_inputs(
+            close=close,
+            close_2y_low=close_2y_low,
+            rsi6=rsi6,
+            rsi6_pct_ui=rsi6_pct_ui,
+            rsi12=rsi12,
+            rsi12_pct_ui=rsi12_pct_ui,
+            value=value,
+            fg_pct_ui=fg_pct_ui,
+            ahr999_value=ahr999_value,
+            ahr999_pct_ui=ahr999_pct_ui,
+            price_to_4y_ma=price_to_4y_ma,
+            inputs=inputs,
+        )
+    return _accumulate_bottom_score(inp)
 
 
 def _pct_2y_at_date(series_by_date: pd.Series, target_date: str) -> float | None:
@@ -454,14 +485,77 @@ def build_inputs_realtime() -> BottomScoreInputs:
     )
 
 
-def _alert_already_sent(session: Any, rule_code: str, bucket_date: str) -> bool:
-    row = session.execute(
-        select(BtcAlertDedup).where(
-            BtcAlertDedup.rule_code == rule_code,
-            BtcAlertDedup.bucket_date == bucket_date,
-        )
+def should_send_alert(
+    *,
+    current_total_score: int,
+    last_sent_time: str | None,
+    last_total_score: int | None,
+    now: datetime | None = None,
+) -> bool:
+    """
+    是否应发送该规则告警：
+    - 从未发送过 → 发送
+    - 当前总分与上次不同 → 发送（不受 4 小时限制）
+    - 总分相同且距上次发送已超过 4 小时 → 发送
+    - 否则不发送
+    """
+    if last_sent_time is None:
+        return True
+    if last_total_score is None or int(current_total_score) != int(last_total_score):
+        return True
+    now_dt = now or datetime.now()
+    try:
+        last_dt = datetime.strptime(last_sent_time, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return True
+    elapsed_hours = (now_dt - last_dt).total_seconds() / 3600.0
+    return elapsed_hours >= ALERT_RESEND_INTERVAL_HOURS
+
+
+def _get_alert_history_row(session: Any, rule_id: str) -> BtcAlertHistory | None:
+    return session.execute(
+        select(BtcAlertHistory).where(BtcAlertHistory.rule_code == rule_id)
     ).scalar_one_or_none()
-    return row is not None
+
+
+def should_send_alert_for_rule(
+    session: Any,
+    rule_id: str,
+    current_total_score: int,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """结合 alert_history 表判断指定规则是否应发送。"""
+    row = _get_alert_history_row(session, rule_id)
+    if row is None:
+        return True
+    return should_send_alert(
+        current_total_score=current_total_score,
+        last_sent_time=row.last_sent_time,
+        last_total_score=row.last_total_score,
+        now=now,
+    )
+
+
+def record_alert_sent(
+    session: Any,
+    rule_id: str,
+    current_total_score: int,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """成功发送后更新 alert_history。"""
+    now_str = (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+    upsert_by_unique_keys(
+        session=session,
+        model=BtcAlertHistory,
+        row_data={
+            "rule_code": rule_id,
+            "last_sent_time": now_str,
+            "last_total_score": int(current_total_score),
+        },
+        unique_keys=["rule_code"],
+    )
 
 
 def _alerts_push_enabled() -> bool:
@@ -495,7 +589,7 @@ def check_realtime_alerts(*, dry_run: bool = False, push: bool | None = None) ->
     1. build_inputs_realtime() 组装输入
     2. calculate_total_score() 计算当前抄底分数
     3. evaluate_triggered_alert_rules() 判定触发因子
-    4. 按规则推送（日内去重），并记录 total_score / triggered_rules
+    4. 按 should_send_alert 防重复后推送，并更新 alert_history
     """
     from scheduler.alert_messages import evaluate_triggered_alert_rules, format_alert_message
 
@@ -506,35 +600,27 @@ def check_realtime_alerts(*, dry_run: bool = False, push: bool | None = None) ->
     inp = build_inputs_realtime()
     total_score = calculate_total_score(inputs=inp)
     triggered_rules = evaluate_triggered_alert_rules(inp)
-    bucket_date = datetime.now().strftime("%Y-%m-%d")
     sent_rules: list[str] = []
     skipped_rules: list[str] = []
-    rules_csv = ",".join(triggered_rules)
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_dt = datetime.now()
 
     with SessionLocal() as session:
         for rule in triggered_rules:
-            if _alert_already_sent(session, rule, bucket_date):
+            if not should_send_alert_for_rule(
+                session, rule, total_score, now=now_dt
+            ):
                 skipped_rules.append(rule)
                 continue
             if not push:
                 continue
-            text = format_alert_message(rule, inp)
-            send_alert_message(text, dry_run=dry_run)
-            if not dry_run:
-                upsert_by_unique_keys(
-                    session=session,
-                    model=BtcAlertDedup,
-                    row_data={
-                        "rule_code": rule,
-                        "bucket_date": bucket_date,
-                        "sent_at": now_str,
-                        "total_score": total_score,
-                        "triggered_rules": rules_csv,
-                    },
-                    unique_keys=["rule_code", "bucket_date"],
+            text = format_alert_message(rule, inp, total_score=total_score)
+            sent_ok = send_alert_message(text, dry_run=dry_run)
+            if sent_ok and not dry_run:
+                record_alert_sent(
+                    session, rule, total_score, now=now_dt
                 )
-            sent_rules.append(rule)
+            if sent_ok:
+                sent_rules.append(rule)
         if not dry_run and push and sent_rules:
             session.commit()
 
@@ -580,9 +666,14 @@ def _run_self_tests() -> None:
             "仅 2A",
         ),
         (
-            BottomScoreInputs(ahr999_value=0.30),
+            BottomScoreInputs(ahr999_value=0.30, ahr999_pct_ui=1.0),
             -15,
-            "仅 5C",
+            "仅 5C（5A/5B 强制 0）",
+        ),
+        (
+            BottomScoreInputs(rsi12=10.0, rsi12_pct_ui=0.5),
+            -10,
+            "仅 3B",
         ),
         (
             BottomScoreInputs(
@@ -600,7 +691,12 @@ def _run_self_tests() -> None:
     for inputs, expected, name in cases:
         got = calculate_total_score(inputs=inputs)
         assert got == expected, f"{name}: expected {expected}, got {got}"
-        assert sum(get_factor_scores(inputs=inputs).values()) == expected, f"{name}: factor sum mismatch"
+        fs = get_factor_scores(inputs=inputs)
+        assert sum(fs.values()) == expected, f"{name}: factor sum mismatch"
+        if name == "仅 5C（5A/5B 强制 0）":
+            assert fs["5C"] == -15 and fs["5A"] == 0 and fs["5B"] == 0, fs
+        if name == "仅 3B":
+            assert fs["3B"] == -10 and fs["3A"] == 0, fs
     print("✅ calculate_total_score / get_factor_scores 内置用例全部通过")
 
 
@@ -615,8 +711,11 @@ def _run_alert_message_tests() -> None:
 
     inp = BottomScoreInputs(rsi6=10.0, rsi6_pct_ui=0.5, close=90000.0)
     assert evaluate_triggered_alert_rules(inp) == ["2B"]
-    msg = format_alert_message("2B", inp)
+    raw_score = -10
+    msg = format_alert_message("2B", inp, total_score=raw_score)
     assert "RSI6=10.00" in msg and "90000.00" in msg
+    assert "当前BTC下跌因子总分: 10 / 100" in msg
+    assert "建议仓位：10%" in msg
     assert msg == ALERT_TEMPLATES["2B"].format(
         close="90000.00",
         rsi6="10.00",
@@ -628,6 +727,7 @@ def _run_alert_message_tests() -> None:
         ahr999_value="N/A",
         ahr999_pct_ui="N/A",
         price_to_4y_ma="N/A",
+        total_score="10",
     )
 
     brief = BriefingSnapshot(
@@ -642,12 +742,37 @@ def _run_alert_message_tests() -> None:
     print("✅ 告警模板与触发规则用例全部通过")
 
 
+def _run_should_send_alert_tests() -> None:
+    base = datetime(2026, 5, 28, 12, 0, 0)
+    assert should_send_alert(current_total_score=-10, last_sent_time=None, last_total_score=None)
+    assert should_send_alert(
+        current_total_score=-20,
+        last_sent_time="2026-05-28 10:00:00",
+        last_total_score=-10,
+        now=base,
+    )
+    assert not should_send_alert(
+        current_total_score=-10,
+        last_sent_time="2026-05-28 10:00:00",
+        last_total_score=-10,
+        now=base,
+    )
+    assert should_send_alert(
+        current_total_score=-10,
+        last_sent_time="2026-05-28 07:00:00",
+        last_total_score=-10,
+        now=base,
+    )
+    print("✅ should_send_alert 防重复逻辑用例全部通过")
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="BTC 抄底分数引擎")
     parser.add_argument("--test", action="store_true", help="仅跑内置打分用例")
     parser.add_argument("--test-alerts", action="store_true", help="跑告警模板与触发用例")
+    parser.add_argument("--test-dedup", action="store_true", help="跑 alert_history 防重复用例")
     parser.add_argument("--alerts", action="store_true", help="执行一次实时告警检测并推送")
     parser.add_argument("--alerts-dry-run", action="store_true", help="实时告警仅写本地日志")
     parser.add_argument("--daily-briefing", action="store_true", help="发送每日早报")
@@ -660,6 +785,8 @@ if __name__ == "__main__":
         _run_self_tests()
     elif args.test_alerts:
         _run_alert_message_tests()
+    elif args.test_dedup:
+        _run_should_send_alert_tests()
     elif args.alerts or args.alerts_dry_run:
         result = check_realtime_alerts(dry_run=args.alerts_dry_run, push=True)
         print(
